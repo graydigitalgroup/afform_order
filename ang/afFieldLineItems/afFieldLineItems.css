@@ -1,0 +1,362 @@
+/* af-field-line-items component styles */
+
+.afo-line-items {
+  margin: 1em 0;
+}
+
+.afo-line-items.afo-loading {
+  opacity: 0.7;
+}
+
+/* Cart table */
+.afo-cart-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.5em;
+}
+
+.afo-cart-table th,
+.afo-cart-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #e5e5e5;
+  vertical-align: middle;
+}
+
+.afo-cart-table thead th {
+  background-color: #f5f5f5;
+  font-weight: 600;
+  border-bottom: 2px solid #ddd;
+}
+
+.afo-cart-table tfoot td {
+  border-top: 2px solid #ddd;
+  background-color: #fafafa;
+}
+
+.afo-cart-num {
+  text-align: right;
+  width: 110px;
+}
+
+.afo-cart-actions {
+  width: 96px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.afo-cart-label {
+  word-break: break-word;
+}
+
+.afo-cart-input {
+  width: 100%;
+  text-align: right;
+  padding: 4px 6px;
+}
+
+.afo-cart-empty {
+  text-align: center;
+  color: #999;
+  padding: 2em !important;
+  font-style: italic;
+}
+
+/* Auto-generated companion rows */
+.afo-cart-row-auto {
+  background-color: #f9fafc;
+}
+
+.afo-cart-row-auto td {
+  color: #555;
+}
+
+.afo-cart-row-auto .afo-cart-label {
+  font-style: italic;
+}
+
+/* Badges */
+.afo-cart-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-left: 6px;
+  font-size: 0.75em;
+  border-radius: 3px;
+  font-weight: normal;
+  vertical-align: middle;
+}
+
+.afo-cart-badge-auto {
+  background-color: #e8eef7;
+  color: #3a5a8a;
+}
+
+.afo-cart-badge-membership {
+  background-color: #e6f3e6;
+  color: #2f6f2f;
+}
+
+/* Remove button */
+.afo-cart-remove {
+  background: none;
+  border: none;
+  color: #b94a48;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.afo-cart-remove:hover {
+  color: #842029;
+}
+
+/* Toolbar */
+.afo-cart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+  margin-top: 0.5em;
+}
+
+.afo-cart-loading {
+  color: #888;
+  font-size: 0.9em;
+}
+
+/* select2 dropdown option rows (formatPickerOption output) */
+.afo-opt-field {
+  font-weight: 600;
+}
+
+.afo-opt-value {
+}
+
+.afo-opt-meta {
+  color: #777;
+  font-size: 0.85em;
+  margin-top: 2px;
+}
+
+/* Advisory (non-blocking) checks */
+.afo-cart-warnings {
+  margin: 0.5em 0;
+}
+
+.afo-cart-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  background-color: #fdf6e3;
+  border: 1px solid #f0e0a8;
+  border-left: 4px solid #d9a407;
+  border-radius: 3px;
+  color: #6b5400;
+  font-size: 0.9em;
+}
+
+.afo-cart-warning .crm-i {
+  margin-top: 2px;
+  color: #d9a407;
+}
+
+/* Submit-area advisory gate (rendered by the consuming form). */
+.afo-cart-gate {
+  margin: 0.75em 0;
+  padding: 10px 12px;
+  background-color: #fdf6e3;
+  border: 1px solid #f0e0a8;
+  border-left: 4px solid #d9a407;
+  border-radius: 3px;
+}
+
+.afo-cart-gate .afo-cart-warning {
+  background: none;
+  border: none;
+  padding: 0 0 6px 0;
+  margin: 0;
+  color: #6b5400;
+}
+
+.afo-cart-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin: 4px 0 0 0;
+  font-weight: bold;
+  color: #6b5400;
+  cursor: pointer;
+}
+
+.afo-cart-confirm input {
+  margin: 0;
+}
+
+/* Row action buttons (edit / revert / remove share styling) */
+.afo-cart-edit,
+.afo-cart-revert {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  color: #5a6a85;
+}
+
+.afo-cart-edit:hover {
+  color: #2a4a7a;
+}
+
+.afo-cart-revert {
+  color: #8a6d3b;
+}
+
+.afo-cart-revert:hover {
+  color: #6b5400;
+}
+
+/* Overridden (manually edited) rows */
+.afo-cart-row-override {
+  background-color: #fffaf0;
+}
+
+.afo-cart-row-override td {
+  box-shadow: inset 3px 0 0 #d9a407;
+}
+
+.afo-cart-badge-override {
+  background-color: #f7eccf;
+  color: #6b5400;
+}
+
+/* Per-line edit modal (inline overlay) */
+.afo-edit-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 1040;
+}
+
+.afo-edit-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 600px;
+  max-width: calc(100vw - 2em);
+  max-height: calc(100vh - 2em);
+  overflow: auto;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+  z-index: 1050;
+}
+
+.afo-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.afo-edit-title {
+  font-weight: 600;
+  font-size: 1.05em;
+}
+
+.afo-edit-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  padding: 2px 6px;
+}
+
+.afo-edit-close:hover {
+  color: #333;
+}
+
+.afo-edit-body {
+  padding: 16px;
+}
+
+.afo-edit-field {
+  margin-bottom: 14px;
+}
+
+.afo-edit-field > label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.afo-edit-field .form-control {
+  width: 100%;
+}
+
+.afo-edit-help {
+  margin: 6px 0 0 0;
+  font-size: 0.85em;
+  color: #777;
+}
+
+.afo-edit-help a {
+  margin-left: 4px;
+}
+
+.afo-edit-footer {
+  display: flex;
+  gap: 0.5em;
+  padding: 12px 16px;
+  border-top: 1px solid #e5e5e5;
+  background: #fafafa;
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+/* Mode toggle (new vs. existing membership) */
+.afo-edit-mode-toggle {
+  display: flex;
+  gap: 1em;
+}
+
+.afo-edit-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-weight: normal;
+  cursor: pointer;
+}
+
+.afo-edit-mode-option input[type="radio"] {
+  margin: 0;
+}
+
+/* Side-by-side date fields */
+.afo-edit-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 1em;
+  margin-bottom: 14px;
+}
+
+.afo-edit-field-row .afo-edit-field {
+  margin-bottom: 0;
+}
+
+.afo-edit-help-row {
+  grid-column: 1 / -1;
+  margin-top: 6px !important;
+}
+
+/* Checkbox label in the edit modal */
+.afo-edit-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  font-weight: normal;
+  cursor: pointer;
+}
+
+.afo-edit-checkbox-label input[type="checkbox"] {
+  margin: 0;
+}

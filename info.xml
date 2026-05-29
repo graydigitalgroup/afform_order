@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<extension key="afform_order" type="module">
+  <file>afform_order</file>
+  <name>Afform Order</name>
+  <description>Editable line-item cart for Afform forms, with auto-computed companion line items and Order submission. Generic engine extracted from the TMPA extension.</description>
+  <license>AGPL-3.0</license>
+  <maintainer>
+    <author>Gray Digital Group</author>
+    <email>support@graydigitalgroup.com</email>
+  </maintainer>
+  <urls>
+    <url desc="Licensing">http://www.gnu.org/licenses/agpl-3.0.html</url>
+  </urls>
+  <releaseDate>2026-05-22</releaseDate>
+  <version>0.1</version>
+  <develStage>alpha</develStage>
+  <compatibility>
+    <ver>5.81</ver>
+  </compatibility>
+  <classloader>
+    <psr0 prefix="CRM_" path="."/>
+    <psr4 prefix="Civi\" path="Civi"/>
+  </classloader>
+  <requires>
+    <ext>org.civicrm.afform</ext>
+    <ext>civi_contribute</ext>
+  </requires>
+  <civix>
+    <namespace>CRM/AfformOrder</namespace>
+    <format>25.10.2</format>
+    <angularModule>crmAfformOrder</angularModule>
+  </civix>
+  <mixins>
+    <mixin>menu-xml@1.0.0</mixin>
+    <mixin>scan-classes@1.0.0</mixin>
+    <mixin>ang-php@1.0.0</mixin>
+  </mixins>
+</extension>

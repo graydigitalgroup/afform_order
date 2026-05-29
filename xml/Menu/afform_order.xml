@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<menu>
+  <!--
+    The settings page "civicrm/admin/setting/afform_order" is auto-registered
+    by the setting-admin mixin (path derived from <file>afform_order</file> in
+    info.xml). The page title is overridden via <civix><setting-page-title> in
+    info.xml. No explicit <item> needed here.
+  -->
+</menu>

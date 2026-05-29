@@ -1,0 +1,10 @@
+<!--
+  Runtime template for the "Line Item Cart" input type.
+
+  Rendered by afField (via ng-include of $ctrl.defn.template) when a form has a
+  field with input_type = 'LineItemCart'. This template runs in an ng-include
+  child scope of afField, so $ctrl here is the afField controller; we hand the
+  cart field name down to the directive via a one-way binding. The form
+  controller is obtained by the directive itself via require ^^afForm.
+-->
+<af-field-line-items cart-field-name="$ctrl.fieldName"></af-field-line-items>

@@ -1,0 +1,7 @@
+<div class="afo-membership-status" ng-if="$ctrl.loaded">
+  <label class="control-label" ng-if="$ctrl.label">{{ $ctrl.label }}</label>
+  <input type="hidden"
+         crm-ui-select="{data: $ctrl.select2Data, allowClear: true, placeholder: ts('Auto (calculated from dates)'), width: '220px'}"
+         ng-model="$ctrl.selectedStatusId"
+         ng-change="$ctrl.onSelectionChange()" />
+</div>

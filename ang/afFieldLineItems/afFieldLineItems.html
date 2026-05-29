@@ -1,0 +1,218 @@
+<div class="afo-line-items" ng-class="{'afo-loading': $ctrl.loading}">
+  <label class="control-label" ng-if="$ctrl.label">{{ $ctrl.label }}</label>
+
+  <table class="afo-cart-table">
+    <thead>
+      <tr>
+        <th>{{ ts('Item') }}</th>
+        <th class="afo-cart-num">{{ ts('Qty') }}</th>
+        <th class="afo-cart-num">{{ ts('Unit Price') }}</th>
+        <th class="afo-cart-num">{{ ts('Total') }}</th>
+        <th class="afo-cart-actions">&nbsp;</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr ng-repeat="row in $ctrl.cart track by row._cart_id"
+          ng-class="{'afo-cart-row-auto': $ctrl.isAuto(row), 'afo-cart-row-override': $ctrl.isOverridden(row)}">
+        <td class="afo-cart-label">
+          {{ row.label }}
+          <span ng-if="$ctrl.isAuto(row)"
+                class="afo-cart-badge afo-cart-badge-auto">{{ ts('auto') }}</span>
+          <span ng-if="row.entity_table === 'civicrm_membership'"
+                class="afo-cart-badge afo-cart-badge-membership">{{ ts('membership') }}</span>
+          <span ng-if="$ctrl.isOverridden(row)"
+                class="afo-cart-badge afo-cart-badge-override">{{ ts('edited') }}</span>
+        </td>
+        <td class="afo-cart-num">
+          <input type="number" min="0" step="1" ng-model="row.qty"
+                 ng-change="$ctrl.onRowChange(row)"
+                 ng-disabled="!$ctrl.isQtyEditable(row)"
+                 class="form-control afo-cart-input" />
+        </td>
+        <td class="afo-cart-num">
+          <input type="number" min="0" step="0.01" ng-model="row.unit_price"
+                 ng-change="$ctrl.onRowChange(row)"
+                 ng-disabled="!$ctrl.isUnitPriceEditable(row)"
+                 class="form-control afo-cart-input" />
+        </td>
+        <td class="afo-cart-num">{{ row.line_total | currency }}</td>
+        <td class="afo-cart-actions">
+          <button type="button" class="afo-cart-edit"
+                  ng-if="$ctrl.canOverride"
+                  ng-click="$ctrl.openEdit(row)"
+                  title="{{ ts('Edit') }}">
+            <i class="crm-i fa-pencil"></i>
+          </button>
+          <button type="button" class="afo-cart-revert"
+                  ng-if="$ctrl.canOverride && $ctrl.isOverridden(row)"
+                  ng-click="$ctrl.revertOverride(row)"
+                  title="{{ ts('Revert to derived') }}">
+            <i class="crm-i fa-undo"></i>
+          </button>
+          <button type="button" class="afo-cart-remove"
+                  ng-click="$ctrl.removeRow(row)"
+                  ng-if="!$ctrl.isAuto(row)"
+                  title="{{ ts('Remove') }}">
+            <i class="crm-i fa-times"></i>
+          </button>
+        </td>
+      </tr>
+      <tr ng-if="!$ctrl.cart.length">
+        <td colspan="5" class="afo-cart-empty">
+          {{ ts('No items yet. Add one below.') }}
+        </td>
+      </tr>
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="3"><strong>{{ ts('Total') }}</strong></td>
+        <td class="afo-cart-num"><strong>{{ $ctrl.cartTotal() | currency }}</strong></td>
+        <td>&nbsp;</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div class="afo-cart-toolbar">
+    <input ng-if="$ctrl.pickerLoaded" type="hidden" class="afo-cart-add"
+           crm-ui-select="{data: $ctrl.pickerSelect2Data, formatResult: $ctrl.formatPickerOption, placeholder: ts('+ Add a line item…'), width: '320px'}"
+           on-crm-ui-select="$ctrl.addPickerSelection(selection)" />
+    <span ng-if="!$ctrl.pickerLoaded" class="afo-cart-loading">
+      <i class="crm-i fa-spinner fa-spin"></i> {{ ts('Loading items…') }}
+    </span>
+    <span ng-if="$ctrl.loading" class="afo-cart-loading">
+      <i class="crm-i fa-spinner fa-spin"></i> {{ ts('Updating…') }}
+    </span>
+  </div>
+
+  <!-- Per-line edit modal (inline overlay) -->
+  <div class="afo-edit-backdrop" ng-if="$ctrl.editOpen" ng-click="$ctrl.cancelEdit()"></div>
+  <div class="afo-edit-modal" ng-if="$ctrl.editOpen" role="dialog" aria-modal="true">
+    <div class="afo-edit-header">
+      <span class="afo-edit-title">{{ ts('Edit line item') }}</span>
+      <button type="button" class="afo-edit-close" ng-click="$ctrl.cancelEdit()"
+              title="{{ ts('Close') }}"><i class="crm-i fa-times"></i></button>
+    </div>
+    <div class="afo-edit-body">
+      <div class="afo-edit-field">
+        <label>{{ ts('Label') }}</label>
+        <input type="text" class="form-control" ng-model="$ctrl.editModel.label" />
+      </div>
+
+      <!-- Companion (auto) rows: editable unit price (mutually-agreed override). -->
+      <div class="afo-edit-field"
+           ng-if="$ctrl.isAuto($ctrl.editModel)">
+        <label>{{ ts('Unit Price') }}</label>
+        <input type="number" min="0" step="0.01" class="form-control"
+               ng-model="$ctrl.editModel.unit_price" />
+        <p class="afo-edit-help">
+          {{ ts('Overrides the derived price for this companion line. Recompute will not regenerate it.') }}
+        </p>
+      </div>
+
+      <!-- Membership rows: mode toggle (renewal of existing vs. new). -->
+      <div class="afo-edit-field afo-edit-mode"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership'">
+        <label>{{ ts('Membership') }}</label>
+        <div class="afo-edit-mode-toggle">
+          <label class="afo-edit-mode-option">
+            <input type="radio" name="afoEditMembershipMode" value="new"
+                   ng-checked="$ctrl.editMembershipMode === 'new'"
+                   ng-click="$ctrl.setEditMembershipMode('new')" />
+            {{ ts('Create new') }}
+          </label>
+          <label class="afo-edit-mode-option">
+            <input type="radio" name="afoEditMembershipMode" value="existing"
+                   ng-checked="$ctrl.editMembershipMode === 'existing'"
+                   ng-click="$ctrl.setEditMembershipMode('existing')" />
+            {{ ts('Renew existing') }}
+          </label>
+        </div>
+      </div>
+
+      <!-- Existing-membership picker (membership + existing mode). -->
+      <div class="afo-edit-field"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership' && $ctrl.editMembershipMode === 'existing'">
+        <label>{{ ts('Existing Membership') }}</label>
+        <select class="form-control"
+                ng-model="$ctrl.editModel._existing_membership_id"
+                ng-options="m.id as $ctrl.formatMembershipOption(m) for m in $ctrl.getEditAvailableMemberships()">
+          <option value="">{{ ts('— Select a membership to renew —') }}</option>
+        </select>
+        <p class="afo-edit-help" ng-if="!$ctrl.getEditAvailableMemberships().length">
+          {{ ts('No existing memberships of this type for this contact.') }}
+        </p>
+      </div>
+
+      <!-- Membership Terms (both modes). -->
+      <div class="afo-edit-field"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership'">
+        <label>{{ ts('Membership Terms') }}</label>
+        <input type="number" min="1" step="1" class="form-control"
+               ng-model="$ctrl.editModel._num_terms_per_unit" />
+        <p class="afo-edit-help">
+          {{ ts('Default for this membership type:') }} {{ $ctrl.editModel._base_num_terms }}.
+          {{ ts('Total terms applied at completion = Membership Terms') }} &times; {{ ts('quantity') }}
+          ({{ $ctrl.editModel._num_terms_per_unit }} &times; {{ $ctrl.editModel.qty }}
+          = {{ ($ctrl.editModel._num_terms_per_unit || 1) * ($ctrl.editModel.qty || 1) }}).
+          <a href="" ng-click="$ctrl.resetEditTerms()"
+             ng-if="$ctrl.editModel._num_terms_per_unit != $ctrl.editModel._base_num_terms">{{ ts('Reset to default') }}</a>
+        </p>
+      </div>
+
+      <!-- Explicit dates (membership + new mode). Both optional: leave blank
+           to let core advance dates from num_terms at completion. -->
+      <div class="afo-edit-field-row"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership' && $ctrl.editMembershipMode === 'new'">
+        <div class="afo-edit-field">
+          <label>{{ ts('Start Date') }}</label>
+          <input class="form-control" crm-ui-datepicker="{time: false}"
+                 ng-model="$ctrl.editModel._start_date" />
+        </div>
+        <div class="afo-edit-field">
+          <label>{{ ts('End Date') }}</label>
+          <input class="form-control" crm-ui-datepicker="{time: false}"
+                 ng-model="$ctrl.editModel._end_date" />
+        </div>
+        <p class="afo-edit-help afo-edit-help-row">
+          {{ ts('Optional. Leave blank to let dates be computed from Membership Terms at payment completion. When set, dates are written to the pending membership and preserved through completion.') }}
+        </p>
+      </div>
+
+      <!-- Status override (membership + new mode). Explicit status implies
+           is_override = TRUE on the server, freezing the status from
+           date-driven recalculation through payment completion. -->
+      <div class="afo-edit-field"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership' && $ctrl.editMembershipMode === 'new'">
+        <label>{{ ts('Status') }}</label>
+        <select class="form-control"
+                ng-model="$ctrl.editModel._status_id"
+                ng-options="s.id as s.label for s in $ctrl.membershipStatuses">
+          <option value="">{{ ts('— Default (Pending until payment) —') }}</option>
+        </select>
+        <p class="afo-edit-help">
+          {{ ts('Choosing a status here freezes it against automatic recalculation. Leave blank to let CiviCRM compute the status from dates on payment completion.') }}
+        </p>
+      </div>
+
+      <!-- is_override checkbox (membership + new mode). Equivalent to picking
+           Pending explicitly: freezes the status from any recalc up through
+           payment completion. Useful when staff want the dates to land
+           unchanged without picking a specific status. -->
+      <div class="afo-edit-field"
+           ng-if="$ctrl.editModel.entity_table === 'civicrm_membership' && $ctrl.editMembershipMode === 'new'">
+        <label class="afo-edit-checkbox-label">
+          <input type="checkbox" ng-model="$ctrl.editModel._membership_is_override" />
+          {{ ts('Freeze status (do not recalculate from dates until payment completes)') }}
+        </label>
+      </div>
+    </div>
+    <div class="afo-edit-footer">
+      <button type="button" class="crm-button" ng-click="$ctrl.saveEdit()">
+        <i class="crm-i fa-check"></i> {{ ts('Save') }}
+      </button>
+      <button type="button" class="crm-button crm-button-type-cancel" ng-click="$ctrl.cancelEdit()">
+        {{ ts('Cancel') }}
+      </button>
+    </div>
+  </div>
+</div>

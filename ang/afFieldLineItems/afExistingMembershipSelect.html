@@ -1,0 +1,25 @@
+<div class="afo-existing-membership">
+  <label class="control-label" ng-if="$ctrl.label">{{ $ctrl.label }}</label>
+
+  <!-- Loaded, contact has memberships: the picker. -->
+  <div ng-if="$ctrl.loaded &amp;&amp; $ctrl.hasMemberships">
+    <input type="hidden"
+           crm-ui-select="{data: $ctrl.select2Data, allowClear: true, placeholder: ts('Create a new membership'), width: '320px'}"
+           ng-model="$ctrl.selectedMembershipId"
+           ng-change="$ctrl.onSelectionChange()" />
+    <p class="description">
+      {{ ts('Leave blank to create a new membership, or pick one to apply the payment to an existing membership.') }}
+    </p>
+  </div>
+
+  <!-- Loaded, none found: confirm a new one will be created (rather than hiding silently). -->
+  <p class="description" ng-if="$ctrl.loaded &amp;&amp; !$ctrl.hasMemberships">
+    {{ ts('No existing memberships found for this contact — a new one will be created.') }}
+  </p>
+
+  <!-- Query in flight (only once a contact id has resolved). -->
+  <p class="description" ng-if="!$ctrl.loaded &amp;&amp; $ctrl.loading">
+    <i class="crm-i fa-spinner fa-spin" aria-hidden="true"></i>
+    {{ ts('Checking for existing memberships…') }}
+  </p>
+</div>
