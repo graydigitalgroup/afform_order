@@ -130,10 +130,17 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
       if (!empty($lineItem->tax_amount)) {
         CRM_Financial_BAO_FinancialItem::add($lineItem, $contributionBAO, TRUE, $trxnIDs);
       }
-      // @todo Ok, so we've created the FinancialItems, but now the calling code might do it again..
+      // OrderLineItem is canonical for FinancialItem creation: callers (Order.modify,
+      // refundrequest) express intent in line-item terms and must NOT call
+      // FinancialItem::add themselves. A negative-unit_price line flows through this
+      // same branch and yields correctly-signed negative FinancialItem(s) with no
+      // special-casing, which is how reversals are represented.
     }
     else {
-      // @todo We're updating a LineItem. What should we do with FinancialItems etc?
+      // Update of an existing LineItem. We deliberately do nothing to FinancialItems
+      // here: a paid line's financial history is immutable, and value changes are
+      // modelled as reverse-and-re-add (a delete + create pair) by the orchestrator,
+      // not as in-place edits. See self_hook_civicrm_delete for the teardown side.
     }
 
     if ($lineItem->entity_table === 'civicrm_membership' && $lineItem->contribution_id && $lineItem->entity_id) {
@@ -202,7 +209,7 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
     }, $record);
 
     // \CRM_Utils_Hook::pre($op, $entityName, $record[$idField] ?? NULL, $record);
-    $event = new \Civi\Core\Event\PreEvent($op, $entityName, $record[$idField], $record);
+    $event = new \Civi\Core\Event\PreEvent($op, $entityName, $record[$idField] ?? NULL, $record);
     self::self_hook_civicrm_pre($event);
 
     // Fill defaults after pre hook to accept any hook modifications
@@ -226,6 +233,95 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
     self::self_hook_civicrm_post($event);
 
     return $instance;
+  }
+
+  /**
+   * Delete a LineItem, tearing down its FinancialItems first.
+   *
+   * Mirrors writeRecord(): routes through our own delete hook under the
+   * entity name "OrderLineItem" so the FinancialItem teardown stays owned
+   * by this BAO rather than the calling code.
+   *
+   * Only Pending (Unpaid) lines may be hard-deleted. A line whose
+   * FinancialItems are Paid / Partially paid carries real financial history
+   * that must not be destroyed; self_hook_civicrm_delete throws in that case.
+   * The orchestrator (Order.modify) is expected to detect the paid state up
+   * front and model the removal as a negative-unit_price reversal line
+   * (an ordinary create) instead of calling delete.
+   *
+   * @param array $record
+   *   Must contain the primary key ('id').
+   *
+   * @return static
+   * @throws \CRM_Core_Exception
+   */
+  public static function deleteRecord(array $record): CRM_Core_DAO {
+    $idField = static::$_primaryKey[0];
+    if (empty($record[$idField])) {
+      throw new CRM_Core_Exception('Cannot delete OrderLineItem without ' . $idField);
+    }
+    $entityName = 'OrderLineItem';
+
+    $instance = new static();
+    $instance->$idField = $record[$idField];
+    if (!$instance->find(TRUE)) {
+      throw new CRM_Core_Exception('OrderLineItem ' . $record[$idField] . ' not found');
+    }
+
+    \CRM_Utils_Hook::pre('delete', $entityName, $instance->$idField, $record);
+    $event = new \Civi\Core\Event\PreEvent('delete', $entityName, $instance->$idField, $record);
+    self::self_hook_civicrm_delete($event);
+
+    $instance->delete();
+
+    \CRM_Utils_Hook::post('delete', $entityName, $instance->$idField, $instance, $record);
+
+    return $instance;
+  }
+
+  /**
+   * Teardown of FinancialItems for a LineItem about to be deleted.
+   *
+   * Fired from deleteRecord() before the line row is removed. Refuses to
+   * proceed if any related FinancialItem is Paid / Partially paid, making
+   * destruction of paid financial history structurally impossible through
+   * this entity.
+   *
+   * @param \Civi\Core\Event\PreEvent $event
+   *
+   * @return void
+   * @throws \CRM_Core_Exception
+   */
+  public static function self_hook_civicrm_delete(\Civi\Core\Event\PreEvent $event): void {
+    if ($event->action !== 'delete') {
+      return;
+    }
+    $lineItemID = $event->id;
+
+    $financialItems = \Civi\Api4\FinancialItem::get(FALSE)
+      ->addSelect('id', 'status_id:name')
+      ->addWhere('entity_table', '=', 'civicrm_line_item')
+      ->addWhere('entity_id', '=', $lineItemID)
+      ->execute();
+
+    foreach ($financialItems as $financialItem) {
+      if (!in_array($financialItem['status_id:name'], ['Unpaid', NULL], TRUE)) {
+        throw new CRM_Core_Exception(
+          'OrderLineItem: cannot delete line ' . $lineItemID . ' because its FinancialItem ' .
+          $financialItem['id'] . ' is "' . $financialItem['status_id:name'] . '". Paid financial history ' .
+          'must be reversed (negative-unit_price line), not deleted.'
+        );
+      }
+    }
+
+    // All related FinancialItems are Unpaid (or none exist) - safe to hard-delete.
+    // EntityFinancialTrxn rows for an Unpaid item have no real payment allocation;
+    // removing the FinancialItem leaves no dangling money movement.
+    foreach ($financialItems as $financialItem) {
+      \Civi\Api4\FinancialItem::delete(FALSE)
+        ->addWhere('id', '=', $financialItem['id'])
+        ->execute();
+    }
   }
 
   /**
