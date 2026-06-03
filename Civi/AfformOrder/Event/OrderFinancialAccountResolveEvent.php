@@ -29,7 +29,7 @@ use Symfony\Contracts\EventDispatcher\Event;
  *
  * This event lets others ADJUST that decision: afform_order computes the default
  * account, then dispatches this event so a listener can override it via
- * setFinancialAccountID(). Most installs (including TMPA, whose requirement IS
+ * setFinancialAccountID(). Most installs (including any whose requirement IS
  * AP-first/Income-fallback) need no listener at all.
  */
 class OrderFinancialAccountResolveEvent extends Event {

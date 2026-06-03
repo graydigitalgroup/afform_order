@@ -34,8 +34,9 @@ use Civi\Api4\Generic\Result;
  *     deletes the line (and its Unpaid FinancialItems).
  *   - PAID contributions (Completed / Partially paid): classifies the net effect
  *     (increase / net_zero / decrease) and dispatches a validate event
- *     (OrderModifyValidateEvent) so a subscriber can veto - e.g. TMPA vetoes
- *     refund-producing edits and routes them to RefundRequest. If not vetoed it
+ *     (OrderModifyValidateEvent) so a subscriber can veto - e.g. a consumer
+ *     extension vetoes refund-producing edits and routes them to a
+ *     refund-request workflow. If not vetoed it
  *     performs the restructure: "remove" REVERSES the line (negated copy, paid
  *     history preserved), "add" creates a new line. It then derives the
  *     contribution status and records an adjustment FinancialTrxn for the new
@@ -164,13 +165,13 @@ class Modify extends AbstractAction {
     //    perform the paid restructure (line reversal) below.
     if (!$isPending) {
       // NOTE: context is OPTIONAL. OrderAO.modify is generic; requiring a
-      // context would be surprising for a non-core API and would leak TMPA's
-      // refund policy into the shared engine. We simply carry whatever context
-      // the caller set (default '') and hand it to validate subscribers. Any
-      // gating of refund-producing edits is a SUBSCRIBER's job (e.g. TMPA vetoes
-      // a decrease unless it came from an approved Refund Request). An install
-      // with no such subscriber gets the generic "just works" behaviour: the
-      // paid reversal proceeds.
+      // context would be surprising for a non-core API and would leak a
+      // consumer's refund policy into the shared engine. We simply carry
+      // whatever context the caller set (default '') and hand it to validate
+      // subscribers. Any gating of refund-producing edits is a SUBSCRIBER's job
+      // (e.g. a consumer extension vetoes a decrease unless it came from an
+      // approved refund request). An install with no such subscriber gets the
+      // generic "just works" behaviour: the paid reversal proceeds.
       $projectedTotal = $this->projectNewTotal($contributionID);
       $currentTotal = (float) ($contribution['total_amount'] ?? 0);
       $netDelta = $projectedTotal - $currentTotal;
@@ -197,9 +198,9 @@ class Modify extends AbstractAction {
       \Civi::dispatcher()->dispatch(OrderModifyValidateEvent::EVENT_NAME, $event);
       $errors = $event->getErrors();
       if ($errors) {
-        // A subscriber vetoed the modification (e.g. TMPA redirecting a refund to
-        // RefundRequest, or refusing because no approved refund request exists).
-        // Nothing has been written. Surface the reason(s).
+        // A subscriber vetoed the modification (e.g. redirecting a refund to a
+        // refund-request workflow, or refusing because no approved refund
+        // request exists). Nothing has been written. Surface the reason(s).
         throw new \CRM_Core_Exception(implode("\n", $errors), 0, ['show_detailed_error' => TRUE]);
       }
 

@@ -27,8 +27,9 @@ use Symfony\Contracts\EventDispatcher\Event;
  *     orchestrator works directly off the contribution + line primitives and
  *     does not construct that BAO.
  *   - We additionally carry the net-effect CLASSIFICATION (increase/net_zero/
- *     decrease), which core's event does not, and which consumers (e.g. TMPA
- *     routing refund-producing edits to RefundRequest) actually need to decide.
+ *     decrease), which core's event does not, and which consumers (e.g. an
+ *     extension routing refund-producing edits to a refund-request workflow)
+ *     actually need to decide.
  *
  * When core's event lands and stabilises, OrderAO.modify can dispatch that
  * instead (or in addition) and this class can be retired.
@@ -93,10 +94,10 @@ class OrderModifyValidateEvent extends Event {
   /**
    * Who is invoking the modify, so a subscriber can decide whether to allow a
    * refund-producing edit. This is a COORDINATION signal, not proof of
-   * authorization: a subscriber that cares (e.g. TMPA) must independently
-   * VERIFY the claim - e.g. on context 'refundrequest', confirm an approved
-   * Refund Request actually exists for this contribution (using contextDetail)
-   * before standing down its veto. Never trust the string alone.
+   * authorization: a subscriber that cares must independently VERIFY the claim
+   * - e.g. on context 'refundrequest', confirm an approved refund request
+   * actually exists for this contribution (using contextDetail) before standing
+   * down its veto. Never trust the string alone.
    *
    * Required on paid modifies (enforced by OrderAO.modify); empty is not
    * permitted there.
