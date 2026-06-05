@@ -16,6 +16,7 @@ use Civi\Api4\Contribution;
 use Civi\Api4\LineItem;
 use Civi\Api4\OrderLineItem;
 use Civi\AfformOrder\Event\OrderModifyValidateEvent;
+use Civi\AfformOrder\Event\OrderLineReversedEvent;
 use Civi\Api4\Generic\AbstractAction;
 use Civi\Api4\Generic\Result;
 
@@ -198,10 +199,23 @@ class Modify extends AbstractAction {
       \Civi::dispatcher()->dispatch(OrderModifyValidateEvent::EVENT_NAME, $event);
       $errors = $event->getErrors();
       if ($errors) {
-        // A subscriber vetoed the modification (e.g. redirecting a refund to a
-        // refund-request workflow, or refusing because no approved refund
-        // request exists). Nothing has been written. Surface the reason(s).
-        throw new \CRM_Core_Exception(implode("\n", $errors), 0, ['show_detailed_error' => TRUE]);
+        // A subscriber vetoed the modification (e.g. a consumer's gate refusing
+        // or routing a refund-producing edit). Nothing has been written.
+        // Surface the reason(s).
+        //
+        // Relay the event's GENERIC metadata bag onto the exception so the
+        // CALLER (e.g. the edit cart UI) can branch on a consumer's structured
+        // outcome. afform_order does not define or interpret any keys - it just
+        // passes whatever a subscriber attached (via setMetadata) straight
+        // through under a neutral 'validate_metadata' key. A consumer and its
+        // client agree on the key names (e.g. 'refund_required'); the engine
+        // stays ignorant of them.
+        $errorData = ['show_detailed_error' => TRUE];
+        $metadata = $event->getAllMetadata();
+        if (!empty($metadata)) {
+          $errorData['validate_metadata'] = $metadata;
+        }
+        throw new \CRM_Core_Exception(implode("\n", $errors), 0, $errorData);
       }
 
       // Not vetoed - perform the PAID restructure. Unlike the Pending path,
@@ -214,8 +228,8 @@ class Modify extends AbstractAction {
       //
       // After restructuring lines we ALSO derive the contribution status and
       // record an adjustment FinancialTrxn (see applyAdjustedBalance). This
-      // follows the established core pattern (CRM_Event_BAO_Participant::
-      // recordAdjustedAmt, as copied by the lineitemedit extension): when a
+      // follows the established core pattern (CRM_Price_BAO_LineItem::
+      // recordAdjustedAmt): when a
       // paid contribution's line total changes and no payment is taken, the
       // status is moved directly (Completed -> Partially paid for an increase,
       // -> Pending refund for a decrease) and an AR adjustment trxn records the
@@ -241,7 +255,11 @@ class Modify extends AbstractAction {
           if (empty($lineItem['id'])) {
             throw new \CRM_Core_Exception('Order modify: each lineItemsToRemove entry requires an id');
           }
-          $this->reverseLine((int) $lineItem['id'], $contributionID);
+          // Optional removal_reason annotates the reversal line's label so the
+          // contribution view shows WHY the back-out happened (e.g. "duplicate",
+          // "entered in error"). Composed in reverseLine where the original
+          // label is in hand.
+          $this->reverseLine((int) $lineItem['id'], $contributionID, $lineItem['removal_reason'] ?? NULL);
         }
 
         // Add each new/corrected line as a normal create.
@@ -468,11 +486,14 @@ class Modify extends AbstractAction {
    *
    * @param int $lineItemID
    * @param int $contributionID
+   * @param string|null $removalReason Optional staff-supplied reason; when set,
+   *   appended to the reversal line's label as " - REVERSED: <reason>" so the
+   *   contribution view documents why the line was backed out.
    *
    * @return void
    * @throws \CRM_Core_Exception
    */
-  private function reverseLine(int $lineItemID, int $contributionID): void {
+  private function reverseLine(int $lineItemID, int $contributionID, ?string $removalReason = NULL): void {
     $orig = LineItem::get(FALSE)
       ->addSelect('*')
       ->addWhere('id', '=', $lineItemID)
@@ -483,6 +504,17 @@ class Modify extends AbstractAction {
       throw new \CRM_Core_Exception(
         'Order modify: line ' . $lineItemID . ' not found on contribution ' . $contributionID . ' to reverse'
       );
+    }
+
+    // Compose the reversal label: the original label, optionally annotated with
+    // the staff-supplied removal reason. Done here (not in a create hook) because
+    // this is the one place both the original label and the caller's reason are
+    // in hand; a generic create hook has no business knowing about removal
+    // reasons.
+    $reversalLabel = $orig['label'] ?? NULL;
+    $reason = is_string($removalReason) ? trim($removalReason) : '';
+    if ($reason !== '') {
+      $reversalLabel = ($reversalLabel ? $reversalLabel . ' ' : '') . '- REVERSED: ' . $reason;
     }
 
     $reversal = [
@@ -498,7 +530,7 @@ class Modify extends AbstractAction {
       'price_field_id' => $orig['price_field_id'] ?? NULL,
       'price_field_value_id' => $orig['price_field_value_id'] ?? NULL,
       'financial_type_id' => $orig['financial_type_id'] ?? NULL,
-      'label' => $orig['label'] ?? NULL,
+      'label' => $reversalLabel,
       'qty' => $orig['qty'] ?? 1,
       // Negate the unit_price; line_total falls out as qty * unit_price (negative).
       'unit_price' => -1 * (float) ($orig['unit_price'] ?? 0),
@@ -511,10 +543,26 @@ class Modify extends AbstractAction {
       'isReversal' => TRUE,
     ];
 
-    civicrm_api4('OrderLineItem', 'create', [
+    $result = civicrm_api4('OrderLineItem', 'create', [
       'checkPermissions' => FALSE,
       'values' => $reversal,
     ]);
+
+    // Provenance seam: hand a listener the exact original->reversal pairing at
+    // the one moment it is known for certain. afform_order records nothing
+    // itself; a consumer can persist this (e.g. an Activity, a custom field, or
+    // eventually an explicit reverses-line column). See OrderLineReversedEvent
+    // and the README known-limitation on reversal provenance.
+    $reversalLineID = (int) ($result->first()['id'] ?? 0);
+    if ($reversalLineID) {
+      $reversedEvent = new OrderLineReversedEvent(
+        $contributionID,
+        $lineItemID,
+        $reversalLineID,
+        -1 * (float) ($orig['line_total'] ?? 0)
+      );
+      \Civi::dispatcher()->dispatch(OrderLineReversedEvent::EVENT_NAME, $reversedEvent);
+    }
   }
 
   /**
