@@ -17,6 +17,7 @@ use Civi\Api4\LineItem;
 use Civi\Api4\OrderLineItem;
 use Civi\AfformOrder\Event\OrderModifyValidateEvent;
 use Civi\AfformOrder\Event\OrderLineReversedEvent;
+use Civi\AfformOrder\ModifyResult;
 use Civi\Api4\Generic\AbstractAction;
 use Civi\Api4\Generic\Result;
 
@@ -137,7 +138,26 @@ class Modify extends AbstractAction {
   }
 
   /**
-   * @param \Civi\Api4\Generic\Result $result
+   * Declare the result class so a vetoed-with-metadata modify can carry the
+   * engine-neutral bag back to the caller on a SUCCESSFUL (HTTP 200) result.
+   *
+   * The api4 action provider (ActionObjectProvider::getResultClass) reads the
+   * @return annotation on THIS method to decide which Result subclass to
+   * instantiate and hand to _run(); the runtime body just delegates to the
+   * parent. This is the same idiom core uses for BasicReplaceAction (whose
+   * execute() @return names ReplaceResult). See ModifyResult for why the
+   * exception path could not carry the metadata.
+   *
+   * @return \Civi\AfformOrder\ModifyResult
+   * @throws \CRM_Core_Exception
+   * @throws \Civi\API\Exception\UnauthorizedException
+   */
+  public function execute() {
+    return parent::execute();
+  }
+
+  /**
+   * @param \Civi\AfformOrder\ModifyResult $result
    *
    * @throws \CRM_Core_Exception
    */
@@ -199,23 +219,50 @@ class Modify extends AbstractAction {
       \Civi::dispatcher()->dispatch(OrderModifyValidateEvent::EVENT_NAME, $event);
       $errors = $event->getErrors();
       if ($errors) {
-        // A subscriber vetoed the modification (e.g. a consumer's gate refusing
-        // or routing a refund-producing edit). Nothing has been written.
-        // Surface the reason(s).
+        // A subscriber vetoed the modification. Nothing has been written.
         //
-        // Relay the event's GENERIC metadata bag onto the exception so the
-        // CALLER (e.g. the edit cart UI) can branch on a consumer's structured
-        // outcome. afform_order does not define or interpret any keys - it just
-        // passes whatever a subscriber attached (via setMetadata) straight
-        // through under a neutral 'validate_metadata' key. A consumer and its
-        // client agree on the key names (e.g. 'refund_required'); the engine
-        // stays ignorant of them.
-        $errorData = ['show_detailed_error' => TRUE];
+        // HOW THE OUTCOME REACHES THE CALLER depends on whether the subscriber
+        // attached engine-neutral metadata to the validate event:
+        //
+        //  - VETO WITH METADATA (e.g. a consumer's gate routing a
+        //    refund-producing edit: "don't apply this; turn it into a refund
+        //    request, here is the intended change"). This is NOT an error - it
+        //    is a valid outcome the engine declined to auto-apply and is
+        //    reporting back. We return it as a SUCCESSFUL result: a row flagged
+        //    applied=FALSE carrying the veto message(s), and the metadata bag on
+        //    the ModifyResult::$validate_metadata property. This is the ONLY
+        //    reliable transport to the api4 AJAX client: a thrown
+        //    CRM_Core_Exception is flattened by CRM_Api4_Page_AJAX to
+        //    error_id/error_code/error_message and the rest of getErrorData() is
+        //    DROPPED, so structured metadata cannot ride out on an exception. A
+        //    200 result, by contrast, is returned whole (declared Result
+        //    properties are forwarded alongside `values`, and the client's
+        //    arrayObject() copies them onto the resolved result). afform_order
+        //    names no keys in the bag; a consumer (and its client) agree on them
+        //    (e.g. 'refund_required').
+        //
+        //  - VETO WITHOUT METADATA (e.g. an unverifiable refund-request context,
+        //    or a double-reversal collision). This is a genuine rejection the
+        //    user must see as an error, so we THROW as before.
+        //
+        // In BOTH cases nothing was written (the veto fires before any
+        // restructure).
         $metadata = $event->getAllMetadata();
         if (!empty($metadata)) {
-          $errorData['validate_metadata'] = $metadata;
+          $result->validate_metadata = $metadata;
+          $result[] = [
+            'id' => $contributionID,
+            'applied' => FALSE,
+            'net_effect' => $netEffect,
+            'net_delta' => $netDelta,
+            'messages' => $errors,
+          ];
+          return;
         }
-        throw new \CRM_Core_Exception(implode("\n", $errors), 0, $errorData);
+        // No metadata: a hard rejection. Keep show_detailed_error so the
+        // message itself (not a generic "an error occurred") reaches the user
+        // even without 'view debug output' permission (see CRM_Api4_Page_AJAX).
+        throw new \CRM_Core_Exception(implode("\n", $errors), 0, ['show_detailed_error' => TRUE]);
       }
 
       // Not vetoed - perform the PAID restructure. Unlike the Pending path,
@@ -299,6 +346,7 @@ class Modify extends AbstractAction {
 
       $result[] = [
         'id' => $contributionID,
+        'applied' => TRUE,
         'total_amount' => $totalAmount,
         'tax_amount' => $taxAmount,
         'net_effect' => $netEffect,
@@ -404,6 +452,7 @@ class Modify extends AbstractAction {
     // 6. Return the updated contribution summary.
     $result[] = [
       'id' => $contributionID,
+      'applied' => TRUE,
       'total_amount' => $totalAmount,
       'tax_amount' => $taxAmount,
     ];

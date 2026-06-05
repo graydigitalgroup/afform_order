@@ -91,14 +91,18 @@
       // Optional callback invoked after a successful submitEdit(), so a host
       // form (or the refundrequest flow) can react (close dialog, refresh).
       onEditSaved: '&?',
-      // Optional callback invoked when OrderAO.modify is vetoed and the
-      // validate event carried metadata (a consumer's gate attached structured
-      // outcome data via setMetadata). afform_order names no metadata keys and
-      // has no refund concept; it forwards the whole bag. A consumer extension
-      // binds this and interprets its own keys. Called with:
+      // Optional callback invoked when OrderAO.modify is vetoed by a
+      // validate subscriber that attached metadata (a consumer's gate attached
+      // structured outcome data via setMetadata). afform_order names no
+      // metadata keys and has no refund concept; it forwards the whole bag.
+      // A consumer extension binds this and interprets its own keys. Called with:
       //   { metadata: <validate_metadata bag from the server>,
       //     contributionId, toAdd, toRemove }
-      // If unbound, the cart just surfaces the veto message as an error.
+      // NOTE the transport: a vetoed-with-metadata modify resolves as a
+      // SUCCESSFUL (200) result carrying res.validate_metadata - NOT a thrown
+      // error - because core's api4 AJAX page drops structured data from thrown
+      // exceptions. So this fires from the .then() of submitEdit, not .catch().
+      // If unbound, the cart surfaces the veto message(s) as a warning.
       onRefundRequired: '&?'
     },
     require: {
@@ -1170,6 +1174,50 @@
 
           return crmApi4('OrderAO', 'modify', params).then(function(res) {
             ctrl.editSaving = false;
+
+            // OrderAO.modify resolves on a 200 even when a validate subscriber
+            // VETOED the change and attached engine-neutral metadata (e.g. a
+            // consumer's gate routing a refund-producing edit). That outcome is
+            // NOT an error and so does NOT arrive in .catch(); it rides on the
+            // result. The metadata bag is a top-level property the api4 AJAX
+            // layer forwards alongside `values` and crm.ajax.js's arrayObject()
+            // copies onto the resolved result - so read res.validate_metadata
+            // (NOT a row field, NOT the error path). The companion row carries
+            // applied=FALSE.
+            //
+            // This is the deliberate transport: a thrown CRM_Core_Exception is
+            // flattened by core's api4 AJAX page to message/code only, dropping
+            // any structured error data - so the bag could never survive the
+            // error path. A successful result is returned whole.
+            var metadata = (res && res.validate_metadata) || null;
+            if (metadata && !$.isEmptyObject(metadata)) {
+              if (ctrl.onRefundRequired) {
+                // afform_order names no keys in the bag; the bound consumer
+                // (e.g. TMPA's <tmpa-edit-order>) interprets its own keys. We
+                // forward the whole bag plus the change we submitted, which is
+                // exactly what a refund request would be built from.
+                ctrl.onRefundRequired({
+                  metadata: metadata,
+                  contributionId: ctrl.editContributionId,
+                  toAdd: submittedToAdd,
+                  toRemove: submittedToRemove
+                });
+              }
+              else {
+                // No handler bound: surface the veto message(s) so the change
+                // isn't silently dropped. The not-applied row carries them.
+                var vetoRow = (res && res[0]) || {};
+                var msgs = (vetoRow.messages && vetoRow.messages.length)
+                  ? vetoRow.messages.join('\n')
+                  : ts('This change was not applied.');
+                CRM.alert(msgs, ts('Not applied'), 'warning');
+              }
+              // Nothing was written; leave the cart as-is so staff can adjust
+              // or retry. Do NOT reload (there is no new persisted state).
+              return;
+            }
+
+            // Applied normally.
             CRM.alert(ts('Order updated'), ts('Saved'), 'success');
             if (ctrl.onEditSaved) {
               ctrl.onEditSaved({ result: (res && res[0]) || null });
@@ -1181,26 +1229,12 @@
         }).catch(function(err) {
           ctrl.editSaving = false;
 
-          // Refund-required veto: OrderAO.modify relays the validate event's
-          // GENERIC metadata bag onto the exception under
-          // error_data.validate_metadata. afform_order names no keys; a
-          // consumer extension and this host agree on them. The host decides
-          // what a given metadata key means by what it does in
-          // onRefundRequired - we simply forward the whole bag plus the change
-          // we submitted. With no handler bound, fall through to the error
-          // alert.
-          var data = (err && (err.error_data || err.errorData)) || null;
-          var metadata = (data && data.validate_metadata) || null;
-          if (metadata && ctrl.onRefundRequired) {
-            ctrl.onRefundRequired({
-              metadata: metadata,
-              contributionId: ctrl.editContributionId,
-              toAdd: submittedToAdd,
-              toRemove: submittedToRemove
-            });
-            return;
-          }
-
+          // A THROWN error from OrderAO.modify is a genuine failure - either a
+          // hard veto with no metadata (e.g. an unverifiable refund-request
+          // context or a double-reversal collision) or an unexpected error.
+          // The refund-routing (veto WITH metadata) outcome does NOT come
+          // through here - it arrives as a successful result and is handled in
+          // the .then() above. So this branch just surfaces the message.
           CRM.alert(
             (err && err.error_message) || ts('Failed to save order changes'),
             ts('Error'), 'error'
