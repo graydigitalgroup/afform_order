@@ -360,3 +360,77 @@
 .afo-edit-checkbox-label input[type="checkbox"] {
   margin: 0;
 }
+
+/* ---- Edit-mode (editing an existing contribution) -------------------- */
+
+/* A loaded line marked for removal: struck through + muted, but still shown
+   so staff can see what will be reversed/deleted and restore it. */
+.afo-cart-row-removed td {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+/* The label cell badges should not be struck through. */
+.afo-cart-row-removed .afo-cart-badge {
+  text-decoration: none;
+}
+
+/* The removal-reason input must stay legible/editable — exempt it from the
+   struck-through + muted styling the removed row applies to its cells. */
+.afo-cart-row-removed .afo-removal-reason,
+.afo-cart-row-removed .afo-removal-reason-input {
+  opacity: 1;
+  text-decoration: none;
+}
+
+.afo-removal-reason {
+  margin-top: 6px;
+}
+
+.afo-removal-reason-input {
+  font-size: 0.9em;
+  max-width: 320px;
+}
+
+.afo-cart-badge-removed {
+  background: #c9302c;
+  color: #fff;
+}
+
+.afo-cart-restore {
+  border: none;
+  background: none;
+  color: #2a6496;
+  cursor: pointer;
+  font-size: 0.9em;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.afo-cart-restore:hover {
+  text-decoration: underline;
+}
+
+/* Edit-mode footer: status note + save button. */
+.afo-edit-mode-footer {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e5e5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.afo-edit-mode-note {
+  margin: 0;
+  padding: 8px 12px;
+  background: #fcf8e3;
+  border: 1px solid #faebcc;
+  border-radius: 4px;
+  color: #8a6d3b;
+  font-size: 0.9em;
+}
+
+.afo-edit-mode-note .crm-i {
+  margin-right: 0.4em;
+}

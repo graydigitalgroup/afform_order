@@ -13,15 +13,26 @@
     </thead>
     <tbody>
       <tr ng-repeat="row in $ctrl.cart track by row._cart_id"
-          ng-class="{'afo-cart-row-auto': $ctrl.isAuto(row), 'afo-cart-row-override': $ctrl.isOverridden(row)}">
+          ng-class="{'afo-cart-row-auto': $ctrl.isAuto(row), 'afo-cart-row-override': $ctrl.isOverridden(row), 'afo-cart-row-removed': $ctrl.isPendingRemove(row)}">
         <td class="afo-cart-label">
           {{ row.label }}
           <span ng-if="$ctrl.isAuto(row)"
                 class="afo-cart-badge afo-cart-badge-auto">{{ ts('auto') }}</span>
           <span ng-if="row.entity_table === 'civicrm_membership'"
                 class="afo-cart-badge afo-cart-badge-membership">{{ ts('membership') }}</span>
-          <span ng-if="$ctrl.isOverridden(row)"
+          <span ng-if="$ctrl.isOverridden(row) && !$ctrl.isEdit"
                 class="afo-cart-badge afo-cart-badge-override">{{ ts('edited') }}</span>
+          <span ng-if="$ctrl.isPendingRemove(row)"
+                class="afo-cart-badge afo-cart-badge-removed">{{ ts('will be removed') }}</span>
+          <!-- EDIT-MODE: optional removal reason, appended to the reversal
+               line's label so the contribution view shows why it was backed
+               out. Only on a loaded row marked for removal. -->
+          <div class="afo-removal-reason"
+               ng-if="$ctrl.isEdit && $ctrl.isPendingRemove(row) && row._line_item_id">
+            <input type="text" class="form-control afo-removal-reason-input"
+                   ng-model="row._removal_reason"
+                   placeholder="{{ ts('Reason for removal (optional)') }}" />
+          </div>
         </td>
         <td class="afo-cart-num">
           <input type="number" min="0" step="1" ng-model="row.qty"
@@ -38,22 +49,29 @@
         <td class="afo-cart-num">{{ row.line_total | currency }}</td>
         <td class="afo-cart-actions">
           <button type="button" class="afo-cart-edit"
-                  ng-if="$ctrl.canOverride"
+                  ng-if="$ctrl.canOverride && !$ctrl.isPendingRemove(row)"
                   ng-click="$ctrl.openEdit(row)"
                   title="{{ ts('Edit') }}">
             <i class="crm-i fa-pencil"></i>
           </button>
           <button type="button" class="afo-cart-revert"
-                  ng-if="$ctrl.canOverride && $ctrl.isOverridden(row)"
+                  ng-if="$ctrl.canOverride && $ctrl.isOverridden(row) && !$ctrl.isEdit"
                   ng-click="$ctrl.revertOverride(row)"
                   title="{{ ts('Revert to derived') }}">
             <i class="crm-i fa-undo"></i>
           </button>
           <button type="button" class="afo-cart-remove"
                   ng-click="$ctrl.removeRow(row)"
-                  ng-if="!$ctrl.isAuto(row)"
+                  ng-if="!$ctrl.isAuto(row) && !$ctrl.isPendingRemove(row)"
                   title="{{ ts('Remove') }}">
             <i class="crm-i fa-times"></i>
+          </button>
+          <!-- EDIT-MODE: restore a row marked for removal. -->
+          <button type="button" class="afo-cart-restore"
+                  ng-click="$ctrl.unmarkRemoved(row)"
+                  ng-if="$ctrl.isEdit && $ctrl.isPendingRemove(row)"
+                  title="{{ ts('Restore') }}">
+            <i class="crm-i fa-undo"></i> {{ ts('Restore') }}
           </button>
         </td>
       </tr>
@@ -82,6 +100,24 @@
     <span ng-if="$ctrl.loading" class="afo-cart-loading">
       <i class="crm-i fa-spinner fa-spin"></i> {{ ts('Updating…') }}
     </span>
+  </div>
+
+  <!-- EDIT-MODE footer: status-aware note + save button. The note tells staff
+       that on a paid contribution, changes are recorded as accounting
+       reversals/adjustments rather than silent deletes (OrderAO.modify picks
+       the path by status). The save button drives submitEdit(). -->
+  <div class="afo-edit-mode-footer" ng-if="$ctrl.isEdit">
+    <p class="afo-edit-mode-note"
+       ng-if="$ctrl.editContributionStatus && $ctrl.editContributionStatus !== 'Pending'">
+      <i class="crm-i fa-info-circle"></i>
+      {{ ts('This contribution is %1. Removing or changing lines records an accounting reversal and rebalances the amount owed; it does not move money. Record a payment or refund separately to settle the balance.', { 1: $ctrl.editContributionStatus }) }}
+    </p>
+    <button type="button" class="crm-button"
+            ng-click="$ctrl.submitEdit()"
+            ng-disabled="$ctrl.editSaving || $ctrl.loading">
+      <i class="crm-i" ng-class="$ctrl.editSaving ? 'fa-spinner fa-spin' : 'fa-check'"></i>
+      {{ $ctrl.editSaving ? ts('Saving…') : ts('Save changes') }}
+    </button>
   </div>
 
   <!-- Per-line edit modal (inline overlay) -->
