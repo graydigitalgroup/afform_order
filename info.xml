@@ -2,7 +2,7 @@
 <extension key="afform_order" type="module">
   <file>afform_order</file>
   <name>Afform Order</name>
-  <description>Editable line-item cart for Afform forms, with auto-computed companion line items and Order submission. Generic engine extracted from the TMPA extension.</description>
+  <description>Editable line-item cart for Afform forms, with auto-computed companion line items and Order submission.</description>
   <license>AGPL-3.0</license>
   <maintainer>
     <author>Gray Digital Group</author>
