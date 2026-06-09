@@ -173,8 +173,8 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
           ->addValue('financial_account_id', $resolvedAccountID)
           ->execute();
       }
-      // OrderLineItem is canonical for FinancialItem creation: callers (Order.modify,
-      // refundrequest) express intent in line-item terms and must NOT call
+      // OrderLineItem is canonical for FinancialItem creation: callers (OrderAO.modify,
+      // consumer workflows) express intent in line-item terms and must NOT call
       // FinancialItem::add themselves. A negative-unit_price line flows through this
       // same branch and yields correctly-signed negative FinancialItem(s) with no
       // special-casing, which is how reversals are represented.

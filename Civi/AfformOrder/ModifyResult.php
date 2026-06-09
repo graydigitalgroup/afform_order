@@ -45,7 +45,7 @@ use Civi\Api4\Generic\Result;
  *
  * afform_order defines no metadata KEYS and interprets none; $validate_metadata
  * is a verbatim relay of whatever a subscriber attached via the validate
- * event's setMetadata(). A consumer (e.g. TMPA) owns the key names.
+ * event's setMetadata(). A consumer extension owns the key names.
  *
  * NAMING ON THE WIRE: the property is snake_case ON PURPOSE. The AJAX page
  * forwards it under its literal PHP property name, so the client reads it as
