@@ -105,12 +105,23 @@
   <!-- EDIT-MODE footer: status-aware note + save button. The note tells staff
        that on a paid contribution, changes are recorded as accounting
        reversals/adjustments rather than silent deletes (OrderAO.modify picks
-       the path by status). The save button drives submitEdit(). -->
+       the path by status), or - on a recurring series' template - that changes
+       define FUTURE installments. The save button drives submitEdit(). -->
   <div class="afo-edit-mode-footer" ng-if="$ctrl.isEdit">
-    <p class="afo-edit-mode-note"
-       ng-if="$ctrl.editContributionStatus && $ctrl.editContributionStatus !== 'Pending'">
+    <p class="afo-edit-mode-note" ng-if="$ctrl.editIsTemplate">
       <i class="crm-i fa-info-circle"></i>
-      {{ ts('This contribution is %1. Removing or changing lines records an accounting reversal and rebalances the amount owed; it does not move money. Record a payment or refund separately to settle the balance.', { 1: $ctrl.editContributionStatus }) }}
+      {{ ts('This is the template for a recurring series. Saving updates what future installments will charge (and the recurring amount); it does not change any installment already billed.') }}
+      <span ng-if="$ctrl.editRecurFrequencyText">
+        {{ ts('This series bills %1.', { 1: $ctrl.editRecurFrequencyText }) }}
+      </span>
+      <span ng-if="$ctrl.editRecurNextDate">
+        {{ ts('The next installment is scheduled for %1.', { 1: $ctrl.editRecurNextDate }) }}
+      </span>
+    </p>
+    <p class="afo-edit-mode-note"
+       ng-if="!$ctrl.editIsTemplate && $ctrl.editContributionStatus && $ctrl.editContributionStatus !== 'Pending'">
+      <i class="crm-i fa-info-circle"></i>
+      {{ ts('This contribution is %1. Changes are booked as accounting adjustments and do not move money on their own. Removing or reducing a line records a reversal, leaving a refund owed (Pending refund); adding or increasing a line leaves a balance due (Partially paid). Record the matching refund or payment separately to settle it.', { 1: $ctrl.editContributionStatus }) }}
     </p>
     <button type="button" class="crm-button"
             ng-click="$ctrl.submitEdit()"

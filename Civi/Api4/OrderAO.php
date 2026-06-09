@@ -11,7 +11,7 @@
  */
 
 namespace Civi\Api4;
-
+use Civi\Api4\Action\OrderAO\EnsureRecurTemplate;
 use Civi\Api4\Action\OrderAO\Modify;
 use Civi\Api4\Generic\AbstractEntity;
 use Civi\Api4\Generic\BasicGetFieldsAction;
@@ -25,10 +25,14 @@ use Civi\Api4\Generic\BasicGetFieldsAction;
  * duplicate class name and collide on the Action\Order namespace. We keep to
  * our own name, in the same spirit as OrderLineItem sidestepping core LineItem.
  *
- * Exposes a single `modify` action that changes the line items of an existing
- * Pending (unpaid) Order, driving the work through the OrderLineItem
- * create / delete primitives and recomputing Contribution totals from the
- * stored line values.
+ * Actions:
+ *  - `modify` changes the line items of an existing Order (Pending, paid, or
+ *    a recurring series' template contribution), driving the work through the
+ *    OrderLineItem create / delete primitives and recomputing Contribution
+ *    totals from the stored line values.
+ *  - `ensureRecurTemplate` resolves (creating if necessary) the template
+ *    contribution of a recurring series, so a caller can point `modify` at it
+ *    to edit the series' future installments.
  *
  * This is NOT a DAO entity - it has no table of its own; it operates on an
  * existing Contribution. Retire in favour of core Order.modify when that lands.
@@ -44,6 +48,15 @@ class OrderAO extends AbstractEntity {
    */
   public static function modify($checkPermissions = TRUE): Modify {
     return (new Modify(static::getEntityName(), __FUNCTION__))
+      ->setCheckPermissions($checkPermissions);
+  }
+
+  /**
+   * @param bool $checkPermissions
+   * @return \Civi\Api4\Action\OrderAO\EnsureRecurTemplate
+   */
+  public static function ensureRecurTemplate($checkPermissions = TRUE): EnsureRecurTemplate {
+    return (new EnsureRecurTemplate(static::getEntityName(), __FUNCTION__))
       ->setCheckPermissions($checkPermissions);
   }
 
@@ -82,6 +95,9 @@ class OrderAO extends AbstractEntity {
   public static function permissions(): array {
     return [
       'modify' => ['edit contributions'],
+      // Resolving the template may CREATE a contribution (the template row),
+      // so it carries the same edit-level gate as modify.
+      'ensureRecurTemplate' => ['edit contributions'],
       'meta' => ['access CiviContribute'],
       'default' => ['edit contributions'],
     ];

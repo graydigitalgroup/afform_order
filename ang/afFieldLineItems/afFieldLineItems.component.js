@@ -84,12 +84,13 @@
       // Origin signal forwarded to OrderAO.modify as `context` (default
       // 'cart_edit'), plus optional structured detail. A modify-validate
       // subscriber (e.g. a refund-gate subscriber) uses these to decide whether
-      // a refund-producing edit is allowed. A refund-request flow sets
-      // context='refundrequest' + contextDetail={activity_id: N}.
+      // a refund-producing edit is allowed. A consumer workflow passes its own
+      // context string + identifying detail (e.g. contextDetail={activity_id: N})
+      // for its subscriber to verify.
       editContext: '<',
       editContextDetail: '<',
       // Optional callback invoked after a successful submitEdit(), so a host
-      // form (or the refundrequest flow) can react (close dialog, refresh).
+      // form (or a consumer workflow) can react (close dialog, refresh).
       onEditSaved: '&?',
       // Optional callback invoked when OrderAO.modify is vetoed by a
       // validate subscriber that attached metadata (a consumer's gate attached
@@ -157,6 +158,19 @@
       // picks delete-vs-reverse by status — but we keep it for affordances
       // (e.g. a "paid: changes book a reversal" note) and to show running totals.
       ctrl.editContributionStatus = null;
+      // TRUE when the contribution under edit is a recurring series' template
+      // (is_template = 1). Affordance only — OrderAO.modify detects templates
+      // itself — but the footer note differs (changes apply to FUTURE
+      // installments; no reversal/balance language, which would be wrong for a
+      // template whose status 'Template' is never 'Pending').
+      ctrl.editIsTemplate = false;
+      // Series cadence shown beside the template note, so staff editing future
+      // installments can see how often the series bills and when the next
+      // charge lands ("every 3 months", "15 July 2026"). Loaded with the
+      // template; either stays null when unavailable and its sentence is
+      // simply omitted.
+      ctrl.editRecurFrequencyText = null;
+      ctrl.editRecurNextDate = null;
       ctrl.editSaving = false;
       // Rows scheduled for removal in edit-mode are not spliced out (so staff
       // can see what will be reversed/deleted and undo it); they stay in the
@@ -927,10 +941,38 @@
       // Every loaded row is pinned (OVERRIDE_FLAG) so that when staff later ADD
       // a new parent and recompute() runs, the engine regenerates companions
       // for the new activity only and never disturbs the loaded (settled) lines.
+
+      // Human-readable series cadence ("every month", "every 3 months") for
+      // the template footer note. A unit map rather than ':label' selects
+      // because the sentence needs singular/plural forms, which ts() does not
+      // derive. Unknown units (defensive) fall through verbatim.
+      function frequencyText(unit, interval) {
+        if (!unit) { return null; }
+        interval = parseInt(interval, 10) || 1;
+        var units = {
+          day: [ts('day'), ts('days')],
+          week: [ts('week'), ts('weeks')],
+          month: [ts('month'), ts('months')],
+          year: [ts('year'), ts('years')]
+        };
+        var forms = units[unit] || [unit, unit];
+        return interval === 1
+          ? ts('every %1', { 1: forms[0] })
+          : ts('every %1 %2', { 1: interval, 2: forms[1] });
+      }
+
       ctrl.loadExistingOrder = function(contributionId) {
         ctrl.loading = true;
         crmApi4('Contribution', 'get', {
-          select: ['id', 'contribution_status_id:name', 'currency'],
+          select: [
+            'id', 'contribution_status_id:name', 'currency', 'is_template',
+            // Series cadence for the template footer note. Implicit-join
+            // selects come back NULL when there is no recur, so this is free
+            // for ordinary contributions.
+            'contribution_recur_id.frequency_unit',
+            'contribution_recur_id.frequency_interval',
+            'contribution_recur_id.next_sched_contribution_date'
+          ],
           where: [['id', '=', contributionId]]
         }).then(function(contribs) {
           var contrib = (contribs && contribs[0]) || null;
@@ -940,12 +982,27 @@
             return;
           }
           ctrl.editContributionStatus = contrib['contribution_status_id:name'];
+          ctrl.editIsTemplate = !!contrib.is_template;
+          if (ctrl.editIsTemplate) {
+            ctrl.editRecurFrequencyText = frequencyText(
+              contrib['contribution_recur_id.frequency_unit'],
+              contrib['contribution_recur_id.frequency_interval']
+            );
+            var nextSched = contrib['contribution_recur_id.next_sched_contribution_date'];
+            // next_sched_contribution_date is processor-maintained and may be
+            // empty (e.g. processors that schedule on their own side); omit
+            // the sentence rather than show a blank.
+            ctrl.editRecurNextDate = nextSched
+              ? ((CRM.utils && CRM.utils.formatDate) ? CRM.utils.formatDate(nextSched) : nextSched)
+              : null;
+          }
 
           return crmApi4('LineItem', 'get', {
             select: [
               'id', 'contribution_id', 'entity_table', 'entity_id',
               'price_field_id', 'price_field_value_id', 'financial_type_id',
               'label', 'qty', 'unit_price', 'line_total', 'tax_amount',
+              'membership_num_terms',
               'price_field_id.html_type', 'price_field_id.is_enter_qty',
               'price_field_value_id.membership_type_id',
               'price_field_value_id.membership_num_terms'
@@ -977,7 +1034,18 @@
               var baseTerms = parseInt(li['price_field_value_id.membership_num_terms'], 10) || 1;
               row._membership_type_id = li['price_field_value_id.membership_type_id'];
               row._base_num_terms = baseTerms;
-              row._num_terms_per_unit = baseTerms;
+              // Reconstruct the per-unit term count the line was actually
+              // stored with, so a per-unit OVERRIDE survives reload (e.g. a
+              // line saved at per-unit 2, qty 3 stored membership_num_terms 6;
+              // defaulting to the PFV base would silently drop the override on
+              // re-save). The stored line total terms / qty inverts what the
+              // terms subscriber computed (qty x per-unit). Fall back to the
+              // base when no stored terms or qty is unusable.
+              var storedTerms = parseInt(li.membership_num_terms, 10) || 0;
+              var loadedQty = parseInt(li.qty, 10) || 0;
+              row._num_terms_per_unit = (storedTerms && loadedQty)
+                ? Math.max(1, Math.round(storedTerms / loadedQty))
+                : baseTerms;
             }
             return row;
           });
@@ -1153,6 +1221,11 @@
             return;
           }
 
+          // (A membership line with no existing membership is no longer blocked
+          // here: the engine creates a Pending membership from the line on
+          // every modify path — Pending, paid, and template. See
+          // Modify::resolveLineItemEntity / saveLineItemEntity.)
+
           // Remember what we're submitting so the catch can hand it to a
           // refund-required handler without rebuilding it.
           submittedToAdd = toAdd;
@@ -1193,7 +1266,7 @@
             if (metadata && !$.isEmptyObject(metadata)) {
               if (ctrl.onRefundRequired) {
                 // afform_order names no keys in the bag; the bound consumer
-                // (e.g. TMPA's <tmpa-edit-order>) interprets its own keys. We
+                // component interprets its own keys. We
                 // forward the whole bag plus the change we submitted, which is
                 // exactly what a refund request would be built from.
                 ctrl.onRefundRequired({
@@ -1219,6 +1292,19 @@
 
             // Applied normally.
             CRM.alert(ts('Order updated'), ts('Saved'), 'success');
+            var savedRow = (res && res[0]) || {};
+            // A template edit also synced the recurring amount and asked the
+            // payment processor to amend the live subscription (best-effort,
+            // server-side). Surface that outcome: the local changes are saved
+            // either way, but "adjust at the processor manually" is an action
+            // staff must see, not silently drop.
+            if (savedRow.is_template && savedRow.processor_message) {
+              CRM.alert(
+                savedRow.processor_message,
+                savedRow.processor_notified ? ts('Subscription updated') : ts('Manual follow-up needed'),
+                savedRow.processor_notified ? 'success' : 'warning'
+              );
+            }
             if (ctrl.onEditSaved) {
               ctrl.onEditSaved({ result: (res && res[0]) || null });
             }
@@ -1258,15 +1344,28 @@
           line_total: qty * unitPrice,
           entity_table: row.entity_table || 'civicrm_contribution'
         };
-        // Carry membership per-line intent so a re-added membership line keeps
-        // its dates/status/terms (OrderLineItem create honours entity_id.* and
-        // the _num_terms machinery on the create path).
+        // Membership linkage: point the line at the membership it belongs to —
+        // the one staff picked in the modal, or the one the loaded line already
+        // referenced. The fallback matters: without it a dirty
+        // reverse-and-readd of a loaded membership line would orphan the
+        // linkage.
+        //
+        // Carry _num_terms_per_unit so the server's OrderModifyEvent terms
+        // subscriber can recompute membership_num_terms = qty x per-unit
+        // (exactly as it does on create) — without it, a re-added/edited
+        // membership line would persist no term count and renew by 1 term at
+        // completion instead of qty x base.
+        //
+        // The per-line date/status extras (entity_id.* ) are still NOT sent
+        // from here: the modal doesn't surface date/status editing for a line
+        // being added via modify yet. The engine creates a Pending, dateless
+        // membership for an orphan membership line on EVERY modify path —
+        // Pending, paid, and template (Modify::resolveLineItemEntity /
+        // saveLineItemEntity).
         if (row.entity_table === 'civicrm_membership') {
-          if (row._existing_membership_id) { spec.entity_id = row._existing_membership_id; }
+          var membershipId = row._existing_membership_id || row.entity_id;
+          if (membershipId) { spec.entity_id = membershipId; }
           if (row._num_terms_per_unit) { spec._num_terms_per_unit = row._num_terms_per_unit; }
-          if (row._start_date) { spec['entity_id.start_date'] = row._start_date; }
-          if (row._end_date) { spec['entity_id.end_date'] = row._end_date; }
-          if (row._status_id) { spec['entity_id.status_id'] = row._status_id; }
         }
         return spec;
       };

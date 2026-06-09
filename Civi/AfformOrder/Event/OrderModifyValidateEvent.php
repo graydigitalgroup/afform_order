@@ -22,10 +22,20 @@ use Symfony\Contracts\EventDispatcher\Event;
  * contribution status, and a net-effect classification (increase/net_zero/
  * decrease). It also exposes a GENERIC metadata bag (setMetadata/getMetadata):
  * a subscriber may attach arbitrary structured data for the caller to read back
- * after a veto. afform_order defines no metadata keys and interprets none - the
- * bag is how a CONSUMER conveys an outcome (e.g. "this veto means create a
- * refund request, here is the intended change") without the engine knowing the
- * concept. OrderAO.modify relays the bag to the caller on a veto.
+ * when the change is vetoed. afform_order defines no metadata keys and
+ * interprets none - the bag is how a CONSUMER conveys an outcome (e.g. "this
+ * veto means create a refund request, here is the intended change") without the
+ * engine knowing the concept.
+ *
+ * HOW THE BAG REACHES THE CALLER: when a subscriber vetoes AND attaches
+ * metadata, OrderAO.modify does NOT throw - it returns a SUCCESSFUL (HTTP 200)
+ * result whose row is flagged applied=FALSE and whose ModifyResult
+ * ::$validate_metadata carries this bag. A veto with NO metadata is a hard
+ * rejection and is thrown instead. The successful-result transport is
+ * deliberate: core's api4 AJAX page flattens a thrown CRM_Core_Exception to
+ * message/code only and drops the rest of getErrorData(), so a structured bag
+ * could never survive the exception path - but a 200 result is returned whole.
+ * See Civi\AfformOrder\ModifyResult.
  *
  * Why our own event (not core's Civi\Order\Event\OrderValidateEvent):
  *   - Core's Order.Modify + OrderValidateEvent (civicrm/civicrm-core#35433) is
@@ -104,12 +114,15 @@ class OrderModifyValidateEvent extends Event {
    * Who is invoking the modify, so a subscriber can decide whether to allow a
    * refund-producing edit. This is a COORDINATION signal, not proof of
    * authorization: a subscriber that cares must independently VERIFY the claim
-   * - e.g. on context 'refundrequest', confirm an approved refund request
-   * actually exists for this contribution (using contextDetail) before standing
-   * down its veto. Never trust the string alone.
+   * - e.g. on a context claiming a refund workflow, confirm an approved refund
+   * request actually exists for this contribution (using contextDetail) before
+   * standing down its veto. Never trust the string alone.
    *
-   * Required on paid modifies (enforced by OrderAO.modify); empty is not
-   * permitted there.
+   * OPTIONAL (default ''). OrderAO.modify is generic and does not require a
+   * context even on paid modifies - it just carries whatever the caller set to
+   * the validate subscribers. Any gating of refund-producing edits is a
+   * SUBSCRIBER's job; an install with no gating subscriber lets a paid edit
+   * proceed regardless of context.
    *
    * @var string
    */
@@ -117,9 +130,9 @@ class OrderModifyValidateEvent extends Event {
 
   /**
    * Optional structured payload accompanying the context, so a subscriber can
-   * verify the claim against specific records, e.g. ['activity_id' => N] or
-   * ['refund_request_id' => N]. Carrying a specific id lets the subscriber
-   * verify THAT request was approved rather than "any approved request exists".
+   * verify the claim against specific records, e.g. ['activity_id' => N].
+   * Carrying a specific id lets the subscriber verify THAT request was
+   * approved rather than "any approved request exists".
    *
    * @var array
    */
@@ -144,9 +157,10 @@ class OrderModifyValidateEvent extends Event {
    * convention to avoid collisions between consumers, e.g.
    * 'refund_required' => [...] set by a refund-gate subscriber.
    *
-   * OrderAO.modify relays this bag to the caller on a veto (see its catch),
-   * so a client can branch on a consumer's outcome without the engine
-   * mediating the meaning.
+   * When a veto carries any metadata, OrderAO.modify returns it on a SUCCESSFUL
+   * result via ModifyResult::$validate_metadata (NOT on a thrown exception - see
+   * the class docblock for why), so a client can branch on a consumer's outcome
+   * without the engine mediating the meaning.
    *
    * @var array
    */
@@ -201,7 +215,8 @@ class OrderModifyValidateEvent extends Event {
   }
 
   /**
-   * The caller-declared origin of this modify (e.g. 'refundrequest', 'cart_edit').
+   * The caller-declared origin of this modify (e.g. 'cart_edit', or a consumer
+   * workflow's own identifier).
    * A COORDINATION signal only - verify before trusting (see property docblock).
    *
    * @return string
@@ -220,8 +235,11 @@ class OrderModifyValidateEvent extends Event {
   }
 
   /**
-   * A subscriber calls this to VETO the modification. Any error set here causes
-   * OrderAO.modify to throw before performing any writes.
+   * A subscriber calls this to VETO the modification. Any error set here stops
+   * OrderAO.modify before it performs any writes. How the veto then surfaces
+   * depends on whether the subscriber also attached metadata: with metadata it
+   * is returned on a successful result (applied=FALSE + ModifyResult
+   * ::$validate_metadata); with none it is thrown. Either way no writes occur.
    *
    * @param string $errorMsg
    * @return void
@@ -273,7 +291,9 @@ class OrderModifyValidateEvent extends Event {
   }
 
   /**
-   * The entire metadata bag. OrderAO.modify relays this to the caller on a veto.
+   * The entire metadata bag. When non-empty on a vetoed modify, OrderAO.modify
+   * returns it to the caller via ModifyResult::$validate_metadata on a
+   * successful result (not on a thrown exception).
    *
    * @return array
    */
