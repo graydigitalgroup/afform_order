@@ -4,7 +4,7 @@ namespace Civi\AfformOrder;
 
 use Civi\Afform\Event\AfformSubmitEvent;
 use Civi\Afform\Event\AfformValidateEvent;
-use Civi\AfformOrder\Event\AlterOrderEvent;
+use Civi\AfformOrder\Event\OrderCreateEvent;
 use Civi\AfformOrder\Event\OrderCreatedEvent;
 use Civi\Core\Service\AutoSubscriber;
 use CRM_AfformOrder_ExtensionUtil as E;
@@ -158,15 +158,15 @@ class Submit extends AutoSubscriber {
     // cart (line items and/or recur values) before it is created — e.g. scaling
     // line item quantities to the recurring period — without reimplementing this
     // handler. Business rules belong in the listener, not here.
-    $alter = new AlterOrderEvent($lineItems, $recurValues, $cart, $extra, $contribution, $event);
-    \Civi::dispatcher()->dispatch(AlterOrderEvent::NAME, $alter);
+    $alter = new OrderCreateEvent($lineItems, $recurValues, $cart, $extra, $contribution, $event);
+    \Civi::dispatcher()->dispatch(OrderCreateEvent::NAME, $alter);
     $lineItems = $alter->getLineItems();
     $recurValues = $alter->getRecurValues();
 
     // Snapshot the lineItems with private (underscore-prefixed) keys intact,
     // so OrderCreatedEvent subscribers (a generic post-create extension point
     // for consumer extensions) can see any private values consumers' own
-    // AlterOrderEvent listeners may have stamped on the lines. The lineItems
+    // OrderCreateEvent listeners may have stamped on the lines. The lineItems
     // passed to Order.create itself have those keys stripped just below.
     $lineItemsWithPrivateKeys = $lineItems;
 
@@ -257,7 +257,7 @@ class Submit extends AutoSubscriber {
           $line['entity_id'] = $effectiveExisting;
         }
         // Carry the per-unit term count (cart default or staff override) as a
-        // private key for the AlterOrderEvent subscriber to scale by qty. It is
+        // private key for the OrderCreateEvent subscriber to scale by qty. It is
         // stripped before Order.create (see saveContributionFromCart).
         if (isset($row['_num_terms_per_unit'])) {
           $line['_num_terms_per_unit'] = (int) $row['_num_terms_per_unit'];

@@ -117,7 +117,7 @@ Two listeners on the Afform submit event:
   extras (`getApiRequest()->getValues()['extra']['fields']` — afForm submits
   extras as a single object, not the per-entity record list that
   `AbstractProcessor` synthesises), recomputes companions one final time,
-  builds line items, builds recur values, dispatches the `AlterOrderEvent`,
+  builds line items, builds recur values, dispatches the `OrderCreateEvent`,
   and runs `Order.create`. The new contribution id is set on the submit event
   so the redirect URL token `[Contribution1.0.id]` resolves correctly.
 
@@ -176,7 +176,7 @@ edit form.
 These are how a consumer extension layers business rules onto the generic
 engine without forking it.
 
-### Server: `Civi\AfformOrder\Event\AlterOrderEvent`
+### Server: `Civi\AfformOrder\Event\OrderCreateEvent`
 
 Fires from `Submit` just before `Order.create`, with mutable line items + recur
 values and read-only context (cart, extras, contribution, original submit
@@ -184,15 +184,23 @@ event). Use it for any per-deployment Order shaping — e.g. setting
 `membership_num_terms = qty × base` so the membership term tracks quantity, or
 applying business-specific overrides.
 
+Its modify-path counterpart is `OrderModifyEvent` (same mutate-before-save role
+for `OrderAO.modify`). They are distinct events, not one action-discriminated
+event, so a create subscriber never receives a modify payload; shape shared
+logic as a callable both subscribers invoke (e.g. a `computeMembershipTerms()`
+helper). See HANDOFF-DECISIONS "Order lifecycle event family". (Naming: bare
+verb = pre-save mutate seam; the past-tense `OrderCreatedEvent` is the
+read-only post-create seam.)
+
 ```php
-use Civi\AfformOrder\Event\AlterOrderEvent;
+use Civi\AfformOrder\Event\OrderCreateEvent;
 use Civi\Core\Service\AutoSubscriber;
 
 class MyOrderSubscriber extends AutoSubscriber {
   public static function getSubscribedEvents(): array {
-    return [AlterOrderEvent::NAME => 'shapeOrder'];
+    return [OrderCreateEvent::NAME => 'shapeOrder'];
   }
-  public function shapeOrder(AlterOrderEvent $event): void {
+  public function shapeOrder(OrderCreateEvent $event): void {
     $lineItems = $event->getLineItems();
     // ...mutate...
     $event->setLineItems($lineItems);
@@ -207,11 +215,11 @@ cart recompute, after stripping all previously auto-generated rows. Each
 subscribed provider appends rows for any drivers in its scope; the resulting
 cart is what the directive renders and what the submit pipeline records.
 
-When to use this vs. `AlterOrderEvent`:
+When to use this vs. `OrderCreateEvent`:
 - **`ComputeCompanionsEvent`** — *generation* of companion lines (a derived
   row that follows from another row). Fires repeatedly during cart editing.
   Must be idempotent.
-- **`AlterOrderEvent`** — *final shaping* of the order at submit time
+- **`OrderCreateEvent`** — *final shaping* of the order at submit time
   (membership term scaling, contribution-level overrides, etc.). Fires once
   per submit.
 
@@ -496,7 +504,12 @@ afform_order/
 │       ├── CartForm.php                            # name-free cart detection
 │       ├── CompanionLogic.php                      # orchestrator (strip + dispatch)
 │       ├── Event/
-│       │   ├── AlterOrderEvent.php                 # final-shaping seam (submit)
+│       │   ├── OrderCreateEvent.php                # pre-save create mutate seam
+│       │   ├── OrderCreatedEvent.php               # post-create read-only seam
+│       │   ├── OrderModifyEvent.php                # pre-save modify mutate seam
+│       │   ├── OrderModifyValidateEvent.php        # modify validate/veto seam
+│       │   ├── OrderLineReversedEvent.php          # reversal provenance seam
+│       │   ├── OrderFinancialAccountResolveEvent.php  # account resolution seam
 │       │   └── ComputeCompanionsEvent.php          # companion-generation seam
 │       └── Submit.php                              # validate + submit subscribers
 ├── Civi/Api4/
