@@ -146,7 +146,25 @@
       // Override permission. Synchronously available because the permission
       // is declared in the module's .ang.php so CRM preloads it for the page.
       // When false, the edit/revert buttons and modal save are hidden.
-      ctrl.canOverride = !!CRM.checkPerm('override afform order line items');
+      // Override-affordance gate (edit pencil / revert). Fast path: the
+      // clientside permission IF this page preloaded it into CRM.permissions.
+      // When the cart is loaded INCREMENTALLY - e.g. an afform opened in a
+      // SearchKit popup, injected into an already-running Angular app - that
+      // global isn't populated for this module, so CRM.checkPerm returns
+      // undefined even for a user who holds the permission. In that case resolve
+      // it from the server. Cached in _canOverride and read via canOverride() so
+      // the template re-evaluates each digest and the affordance appears once
+      // resolved (full page, popup, or modal alike).
+      var OVERRIDE_PERM = 'override afform order line items';
+      ctrl._canOverride = !!CRM.checkPerm(OVERRIDE_PERM);
+      if (!CRM.permissions || !(OVERRIDE_PERM in CRM.permissions)) {
+        crmApi4('OrderAO', 'canOverrideLineItems', {}).then(function(rows) {
+          ctrl._canOverride = !!(rows && rows.length && rows[0].can_override);
+        });
+      }
+      ctrl.canOverride = function() {
+        return ctrl._canOverride;
+      };
 
       // ---- Edit-mode state ------------------------------------------------
       // editMode is the opt-in flag; when on, the component loads an existing

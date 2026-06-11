@@ -98,6 +98,11 @@ class OrderAO extends AbstractEntity {
       // Resolving the template may CREATE a contribution (the template row),
       // so it carries the same edit-level gate as modify.
       'ensureRecurTemplate' => ['edit contributions'],
+      // Reporting whether the caller holds the override permission is a
+      // read-only self-check the cart makes to decide whether to show its
+      // per-line edit affordances; gate it at view level so the call itself
+      // succeeds for any contribute user (it returns the boolean either way).
+      'canOverrideLineItems' => ['access CiviContribute'],
       'meta' => ['access CiviContribute'],
       'default' => ['edit contributions'],
     ];

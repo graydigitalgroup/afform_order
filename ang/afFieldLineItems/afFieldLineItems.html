@@ -49,13 +49,13 @@
         <td class="afo-cart-num">{{ row.line_total | currency }}</td>
         <td class="afo-cart-actions">
           <button type="button" class="afo-cart-edit"
-                  ng-if="$ctrl.canOverride && !$ctrl.isPendingRemove(row)"
+                  ng-if="$ctrl.canOverride() && !$ctrl.isPendingRemove(row)"
                   ng-click="$ctrl.openEdit(row)"
                   title="{{ ts('Edit') }}">
             <i class="crm-i fa-pencil"></i>
           </button>
           <button type="button" class="afo-cart-revert"
-                  ng-if="$ctrl.canOverride && $ctrl.isOverridden(row) && !$ctrl.isEdit"
+                  ng-if="$ctrl.canOverride() && $ctrl.isOverridden(row) && !$ctrl.isEdit"
                   ng-click="$ctrl.revertOverride(row)"
                   title="{{ ts('Revert to derived') }}">
             <i class="crm-i fa-undo"></i>
