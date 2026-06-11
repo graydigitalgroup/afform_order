@@ -1045,7 +1045,13 @@ class Modify extends AbstractAction {
    * @throws \CRM_Core_Exception
    */
   private function beginPaidAdjustment(int $contributionID, float $updatedAmount, float $priorTotal): ?int {
-    $paidAmount = (float) \CRM_Core_BAO_FinancialTrxn::getTotalPayments($contributionID);
+    // includeRefund = TRUE so paidAmount is the NET cash received: core's
+    // getTotalPayments counts only Completed payments by default and EXCLUDES
+    // refund trxns (status 'Refunded', is_payment=1, negative). On a
+    // previously-refunded contribution that overstates what was paid and would
+    // mis-set the status here (reading an overpayment that the refund already
+    // returned). Netting refunds makes balanceAmt the true outstanding balance.
+    $paidAmount = (float) \CRM_Core_BAO_FinancialTrxn::getTotalPayments($contributionID, TRUE);
     $balanceAmt = $updatedAmount - $paidAmount;
     // The change THIS call introduced - the amount to book on the AR account.
     $incrementAmt = $updatedAmount - $priorTotal;
