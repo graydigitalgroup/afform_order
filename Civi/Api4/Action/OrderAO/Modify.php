@@ -325,7 +325,7 @@ class Modify extends AbstractAction {
       // _recordAdjustedAmt books the full balance because changeFeeSelections
       // runs once for the entire new selection, not incrementally.)
       $priorTotal = (float) ($contribution['total_amount'] ?? 0);
-      \CRM_Core_Transaction::create()->run(function (\CRM_Core_Transaction $tx) use ($contributionID, $priorTotal, $projectedTotal, &$totalAmount, &$taxAmount) {
+      \CRM_Core_Transaction::create()->run(function (\CRM_Core_Transaction $tx) use ($contributionID, $priorTotal, $projectedTotal, $netEffect, &$totalAmount, &$taxAmount) {
         // 1. Reverse each "removed" line FIRST, while the contribution is still
         //    in its pre-edit status. A reversal line's FinancialItem is created
         //    against the original payment (the established, refund-flow-tested
@@ -371,7 +371,16 @@ class Modify extends AbstractAction {
           $lineItem['contribution_id'] = $contributionID;
           $lineItem['entity_table'] ??= 'civicrm_contribution';
           $lineItem['entity_id'] ??= $contributionID;
-          if ($arTrxnId) {
+          // Allocate the new line's FinancialItem(s) to the AR adjustment trxn
+          // ONLY on a net INCREASE - a genuinely new, not-yet-paid line (money
+          // now owed). On a net DECREASE these adds are a refund's RETAINED
+          // re-add (reverse the original line, add back the kept portion); that
+          // retained amount is ALREADY-PAID money, so it must allocate to the
+          // original payment - which it does when financial_trxn_id is left
+          // unset (the OrderLineItem hook falls back to the earliest payment
+          // trxn), the pre-reorder behaviour. Routing it to the negative AR
+          // adjustment instead would misallocate the retained, paid amount.
+          if ($arTrxnId && $netEffect === OrderModifyValidateEvent::EFFECT_INCREASE) {
             $lineItem['financial_trxn_id'] = $arTrxnId;
           }
           civicrm_api4('OrderLineItem', 'create', [
