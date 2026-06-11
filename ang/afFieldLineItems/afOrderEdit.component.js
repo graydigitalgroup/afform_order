@@ -90,7 +90,7 @@
           'on-edit-saved="$ctrl.handleTemplateSaved(result)">' +
         '</af-field-line-items>' +
       '</div>',
-    controller: function($scope, $q, $sce, crmApi4) {
+    controller: function($scope, $q, $sce, $element, $timeout, crmApi4) {
       var ts = $scope.ts = CRM.ts('afform_order');
       var ctrl = this;
 
@@ -190,13 +190,37 @@
         });
       };
 
-      // Successful direct edit (either scope) — the cart already reloaded
-      // itself and alerted; just forward the result to any bound consumer.
+      // Successful direct edit (installment scope) — the cart already reloaded
+      // itself and alerted; forward the result to any bound consumer, then, if
+      // we are hosted in a popup, close it and let the opener refresh.
       ctrl.handleSaved = function(result) {
         if (ctrl.onSaved) {
           ctrl.onSaved({ result: result });
         }
+        // Deferred so the cart finishes its own success digest/reload first.
+        $timeout(closePopupIfModal);
       };
+
+      // When this editor is hosted inside a CRM popup (e.g. opened from a
+      // SearchKit display link), a successful save should close the dialog and
+      // let the opener refresh - the lifecycle a normal afform/QuickForm submit
+      // gets. The edit cart saves via OrderAO.modify directly (not an afform
+      // submit), so that signal is never fired; we fire it here. crm.ajax's
+      // popup handler listens for 'crmFormSuccess' on the dialog, closes it, and
+      // re-triggers 'crmPopupFormSuccess' on the opener, which SearchKit /
+      // livePage refresh on - so one event does both, regardless of who opened
+      // the popup. Guarded to a dialog context: on a standalone page there is
+      // nothing to close, so the editor stays put and the cart's own "updated"
+      // notice stands. Only the clean installment save calls this - the
+      // refund-veto path (terminal banner) and the future/template save (recur
+      // summary) deliberately keep the editor open so their messages remain
+      // visible.
+      function closePopupIfModal() {
+        var $el = CRM.$($element);
+        if ($el.closest('.ui-dialog-content').length) {
+          $el.trigger('crmFormSuccess');
+        }
+      }
 
       // A future-scope save already re-synced ContributionRecur.amount and
       // attempted the processor amendment server-side (OrderAO.modify), and the
