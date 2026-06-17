@@ -12,6 +12,8 @@
 
 namespace Civi\Api4\Action\OrderAO;
 
+use Civi\AfformOrder\Event\OrderRecurTemplateCreatedEvent;
+use Civi\Api4\Contribution;
 use Civi\Api4\ContributionRecur;
 use Civi\Api4\Generic\AbstractAction;
 use Civi\Api4\Generic\Result;
@@ -68,6 +70,16 @@ class EnsureRecurTemplate extends AbstractAction {
       );
     }
 
+    // Detect whether this call MATERIALIZES the template vs resolves an existing
+    // one, so the created-seam fires only once (a consumer pruning copied lines
+    // must not re-run on every future-scope open).
+    $hadTemplate = (bool) Contribution::get(FALSE)
+      ->addSelect('id')
+      ->addWhere('contribution_recur_id', '=', $this->contributionRecurID)
+      ->addWhere('is_template', '=', TRUE)
+      ->execute()
+      ->first();
+
     $templateContributionID = \CRM_Contribute_BAO_ContributionRecur::ensureTemplateContributionExists(
       $this->contributionRecurID
     );
@@ -78,6 +90,17 @@ class EnsureRecurTemplate extends AbstractAction {
       throw new \CRM_Core_Exception(
         'Order ensureRecurTemplate: recurring contribution ' . $this->contributionRecurID .
         ' has no contributions to derive a template from'
+      );
+    }
+
+    // Newly materialized: core copied the latest installment's lines into the
+    // template. Let a consumer prune lines that should not recur (e.g. a
+    // suspense/placeholder line). Fires once - not when resolving an existing
+    // template. afform_order names no such lines itself.
+    if (!$hadTemplate) {
+      \Civi::dispatcher()->dispatch(
+        OrderRecurTemplateCreatedEvent::EVENT_NAME,
+        new OrderRecurTemplateCreatedEvent($this->contributionRecurID, (int) $templateContributionID)
       );
     }
 
