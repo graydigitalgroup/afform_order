@@ -18,6 +18,7 @@ use Civi\Api4\LineItem;
 use Civi\Api4\OrderLineItem;
 use Civi\AfformOrder\Event\OrderModifyValidateEvent;
 use Civi\AfformOrder\Event\OrderModifyEvent;
+use Civi\AfformOrder\Event\OrderModifiedEvent;
 use Civi\AfformOrder\Event\OrderLineReversedEvent;
 use Civi\AfformOrder\ModifyResult;
 use Civi\Api4\Generic\AbstractAction;
@@ -127,6 +128,24 @@ class Modify extends AbstractAction {
    * @var array
    */
   protected array $contextDetail = [];
+
+  /**
+   * Ids of line items CREATED during this modify (added/corrected lines),
+   * accumulated as the restructure runs and reported in OrderModifiedEvent.
+   *
+   * @var int[]
+   */
+  private array $modifyAddedLineIDs = [];
+
+  /**
+   * Map [removedLineItemID => addedLineItemID] for corrected lines, built from
+   * the `_replaces_line_item_id` provenance on add specs. Reported in
+   * OrderModifiedEvent so a consumer can follow a line's identity across the
+   * remove-and-re-add.
+   *
+   * @var array<int, int>
+   */
+  private array $modifyReplacements = [];
 
   /**
    * Convenience setter: queue a single line item for addition.
@@ -364,6 +383,11 @@ class Modify extends AbstractAction {
               '(a line item must reference a price field value).'
             );
           }
+          // Provenance: a corrected line carries the id of the line it replaces
+          // (set by the cart). Pull it off before create (not a LineItem column)
+          // and record the old->new pairing for OrderModifiedEvent.
+          $replaces = $lineItem['_replaces_line_item_id'] ?? NULL;
+          unset($lineItem['_replaces_line_item_id']);
           // A membership (or other connected-entity) line with no entity_id is
           // CREATED here (see resolveLineItemEntity): a Pending membership that
           // renews when the balance payment completes the contribution.
@@ -383,10 +407,11 @@ class Modify extends AbstractAction {
           if ($arTrxnId && $netEffect === OrderModifyValidateEvent::EFFECT_INCREASE) {
             $lineItem['financial_trxn_id'] = $arTrxnId;
           }
-          civicrm_api4('OrderLineItem', 'create', [
+          $createdLine = civicrm_api4('OrderLineItem', 'create', [
             'checkPermissions' => FALSE,
             'values' => $lineItem,
-          ]);
+          ])->first();
+          $this->recordAddedLine($createdLine, $replaces);
         }
 
         // 4. Recompute the contribution total/tax from the stored lines (now
@@ -401,6 +426,10 @@ class Modify extends AbstractAction {
           $taxAmount += (float) ($line['tax_amount'] ?? 0);
         }
         $this->persistContributionTotals($contributionID, $totalAmount, $taxAmount);
+
+        // Post-restructure seam (inside the txn so a listener's writes are
+        // atomic with the modify). Paid path is never a template.
+        $this->dispatchModified($contributionID, FALSE);
       });
 
       $result[] = [
@@ -473,6 +502,11 @@ class Modify extends AbstractAction {
             '(a line item must reference a price field value).'
           );
         }
+        // Provenance: a corrected line carries the id of the line it replaces
+        // (set by the cart). Pull it off before create (not a LineItem column)
+        // and record the old->new pairing for OrderModifiedEvent.
+        $replaces = $lineItem['_replaces_line_item_id'] ?? NULL;
+        unset($lineItem['_replaces_line_item_id']);
         // A membership line with no membership to point at is CREATED here: a
         // Pending, dateless membership, recur-linked when the contribution has
         // a recur. This is the pending/template path, where the
@@ -489,10 +523,11 @@ class Modify extends AbstractAction {
         // version, hence setting the values rather than relying on it.)
         $lineItem['entity_table'] ??= 'civicrm_contribution';
         $lineItem['entity_id'] ??= $contributionID;
-        civicrm_api4('OrderLineItem', 'create', [
+        $createdLine = civicrm_api4('OrderLineItem', 'create', [
           'checkPermissions' => FALSE,
           'values' => $lineItem,
-        ]);
+        ])->first();
+        $this->recordAddedLine($createdLine, $replaces);
       }
 
       // 5. Recompute Contribution totals by summing the *stored* line values
@@ -542,6 +577,10 @@ class Modify extends AbstractAction {
         $savedContribution->find(TRUE);
         \CRM_Contribute_BAO_ContributionRecur::updateOnTemplateUpdated($savedContribution);
       }
+
+      // Post-restructure seam (inside the txn so a listener's writes are atomic
+      // with the modify).
+      $this->dispatchModified($contributionID, $isTemplate);
     });
 
     // 6. For a template, ask the payment processor to amend the live
@@ -603,6 +642,56 @@ class Modify extends AbstractAction {
     $event = new OrderModifyEvent($contributionID, $this->lineItemsToAdd, $isTemplate);
     \Civi::dispatcher()->dispatch(OrderModifyEvent::NAME, $event);
     $this->lineItemsToAdd = $event->getLineItems();
+  }
+
+  /**
+   * Record a line just created by the restructure: its id (for
+   * addedLineItemIDs) and, when it corrects an existing line, the old->new
+   * pairing (for the replacements map). Reported in OrderModifiedEvent.
+   *
+   * @param array|null $createdLine The OrderLineItem.create result row.
+   * @param int|null $replaces The id of the line this one replaces, if any.
+   * @return void
+   */
+  private function recordAddedLine(?array $createdLine, $replaces): void {
+    $newId = (int) ($createdLine['id'] ?? 0);
+    if (!$newId) {
+      return;
+    }
+    $this->modifyAddedLineIDs[] = $newId;
+    if (!empty($replaces)) {
+      $this->modifyReplacements[(int) $replaces] = $newId;
+    }
+  }
+
+  /**
+   * Fire the post-restructure seam (OrderModifiedEvent) describing the change:
+   * the lines added, the lines the caller asked to remove, and the old->new
+   * pairing for corrected lines. Dispatched from INSIDE the restructure
+   * transaction so a listener's writes commit/roll back with the modify.
+   *
+   * afform_order ships no listener; this is provenance for consumers (e.g.
+   * re-establishing a soft credit on a replacement line). See OrderModifiedEvent.
+   *
+   * @param int $contributionID
+   * @param bool $isTemplate
+   * @return void
+   */
+  private function dispatchModified(int $contributionID, bool $isTemplate): void {
+    $removedLineIDs = [];
+    foreach ($this->lineItemsToRemove as $lineItem) {
+      if (!empty($lineItem['id'])) {
+        $removedLineIDs[] = (int) $lineItem['id'];
+      }
+    }
+    $event = new OrderModifiedEvent(
+      $contributionID,
+      $this->modifyAddedLineIDs,
+      $removedLineIDs,
+      $this->modifyReplacements,
+      $isTemplate
+    );
+    \Civi::dispatcher()->dispatch(OrderModifiedEvent::EVENT_NAME, $event);
   }
 
   /**
