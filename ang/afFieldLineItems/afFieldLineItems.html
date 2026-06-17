@@ -126,6 +126,7 @@
       {{ ts('This contribution is %1. Changes are booked as accounting adjustments and do not move money on their own. Removing or reducing a line records a reversal, leaving a refund owed (Pending refund); adding or increasing a line leaves a balance due (Partially paid). Record the matching refund or payment separately to settle it.', { 1: $ctrl.editContributionStatus }) }}
     </p>
     <button type="button" class="crm-button"
+            ng-if="!$ctrl.embedded"
             ng-click="$ctrl.submitEdit()"
             ng-disabled="$ctrl.editSaving || $ctrl.loading">
       <i class="crm-i" ng-class="$ctrl.editSaving ? 'fa-spinner fa-spin' : 'fa-check'"></i>

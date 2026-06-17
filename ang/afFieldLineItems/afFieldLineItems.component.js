@@ -104,7 +104,13 @@
       // error - because core's api4 AJAX page drops structured data from thrown
       // exceptions. So this fires from the .then() of submitEdit, not .catch().
       // If unbound, the cart surfaces the veto message(s) as a warning.
-      onRefundRequired: '&?'
+      onRefundRequired: '&?',
+      // Edit-mode only. When TRUE the cart is EMBEDDED in a host that owns a
+      // single combined Save (e.g. <af-order-edit>): the cart hides its own
+      // footer Save button and instead runs submitEdit when the host broadcasts
+      // 'afOrderEditSave' — so header details + line items save under one click.
+      // Default (unset) keeps the cart's own button (standalone behaviour).
+      embedded: '<?'
     },
     require: {
       afForm: '?^^afForm'
@@ -268,6 +274,18 @@
               ctrl.loadExistingOrder(ctrl.editContributionId);
             }
           });
+          // When embedded in a host that owns the combined Save, run submitEdit
+          // on the host's broadcast instead of via our own footer button. The
+          // 'coordinated' flag keeps the "no changes to save" notice quiet — the
+          // host's save may be only header-detail changes, with no line edits.
+          if (ctrl.embedded) {
+            $scope.$on('afOrderEditSave', function(evt, data) {
+              var targetId = data && data.contributionId;
+              if (!targetId || String(targetId) === String(ctrl.editContributionId)) {
+                ctrl.submitEdit({ coordinated: true });
+              }
+            });
+          }
           return;
         }
 
@@ -1217,7 +1235,11 @@
       // A FRESH live read is taken only as a safety check: skip a remove for a
       // line that has already vanished (the order moved since load). It is not
       // used to detect changes — the _dirty flag carries that.
-      ctrl.submitEdit = function() {
+      ctrl.submitEdit = function(opts) {
+        // coordinated = invoked by a host's combined Save (see the embedded
+        // binding). When there are no line changes we stay silent rather than
+        // alerting "nothing to do" — the host's save may carry only header edits.
+        var coordinated = !!(opts && opts.coordinated);
         if (!ctrl.isEdit || ctrl.editSaving) { return; }
         if (!ctrl.editContributionId) {
           CRM.alert(ts('No contribution to modify'), ts('Error'), 'error');
@@ -1302,7 +1324,15 @@
 
           if (!toAdd.length && !toRemove.length) {
             ctrl.editSaving = false;
-            CRM.alert(ts('No changes to save'), ts('Nothing to do'), 'info');
+            // Coordinated save (host combined Save): the header details may have
+            // changed even though no line items did — stay quiet, still signal
+            // saved so the host can finish (close popup / refresh).
+            if (coordinated) {
+              if (ctrl.onEditSaved) { ctrl.onEditSaved({ result: { id: ctrl.editContributionId, applied: false } }); }
+            }
+            else {
+              CRM.alert(ts('No changes to save'), ts('Nothing to do'), 'info');
+            }
             return;
           }
 

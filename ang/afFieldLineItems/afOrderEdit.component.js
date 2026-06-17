@@ -53,7 +53,20 @@
       // consumer binds FALSE to suppress it — e.g. a series whose installments
       // are NOT generated from the core recur template (so editing the template
       // would be meaningless). Only an explicit false hides the toggle.
-      allowFutureScope: '<?'
+      allowFutureScope: '<?',
+      // Optional: the name of a Contribution af-entity declared on the host
+      // afform (e.g. "Contribution1"), whose af-fields hold the contribution's
+      // header detail values (core + custom). When set, the combined Save reads
+      // those values (afForm.getData(name)[0].fields) and writes them via
+      // Contribution.update BEFORE the line-item modify. The fields render
+      // natively as af-fields (every type, custom included) - afform_order
+      // renders no header UI itself. Requires the host afform (^^afForm).
+      detailsEntity: '@?'
+    },
+    require: {
+      // Optional so non-afform / standalone uses still work; required only to
+      // read the detailsEntity field values.
+      afForm: '?^^afForm'
     },
     template:
       '<div class="af-order-edit">' +
@@ -82,17 +95,22 @@
           '<i class="crm-i" ng-class="$ctrl.recurSummary.notified ? \'fa-check-circle\' : \'fa-exclamation-triangle\'" aria-hidden="true"></i> ' +
           '<span>{{ $ctrl.recurSummary.text }}</span>' +
         '</div>' +
-        '<af-order-details ng-if="$ctrl.scope === \'installment\' && $ctrl.contributionId && !$ctrl.terminalMessage" ' +
-          'contribution-id="$ctrl.contributionId" ' +
-          'on-saved="$ctrl.handleDetailsSaved(result)">' +
-        '</af-order-details>' +
         '<af-field-line-items ng-if="$ctrl.scope === \'installment\' && $ctrl.contributionId && !$ctrl.terminalMessage" ' +
           'edit-mode="true" ' +
+          'embedded="true" ' +
           'edit-contribution-id="$ctrl.contributionId" ' +
           'edit-context="\'cart_edit\'" ' +
           'on-edit-saved="$ctrl.handleSaved(result)" ' +
           'on-refund-required="$ctrl.handleVeto(metadata, contributionId, toAdd, toRemove)">' +
         '</af-field-line-items>' +
+        // Single combined Save for the installment scope: saves the header
+        // details first, then submits the line-item changes (see ctrl.save).
+        '<div class="af-order-edit-footer" ng-if="$ctrl.scope === \'installment\' && $ctrl.contributionId && !$ctrl.terminalMessage">' +
+          '<button type="button" class="crm-button" ng-click="$ctrl.save()" ng-disabled="$ctrl.saving">' +
+            '<i class="crm-i" ng-class="$ctrl.saving ? \'fa-spinner fa-spin\' : \'fa-check\'"></i> ' +
+            '{{ $ctrl.saving ? ts("Saving…") : ts("Save changes") }}' +
+          '</button>' +
+        '</div>' +
         '<af-field-line-items ng-if="$ctrl.scope === \'future\' && $ctrl.templateContributionId && !$ctrl.terminalMessage" ' +
           'edit-mode="true" ' +
           'edit-contribution-id="$ctrl.templateContributionId" ' +
@@ -100,9 +118,49 @@
           'on-edit-saved="$ctrl.handleTemplateSaved(result)">' +
         '</af-field-line-items>' +
       '</div>',
-    controller: function($scope, $q, $sce, $element, $timeout, crmApi4) {
+    controller: function($scope, $rootScope, $q, $sce, $element, $timeout, crmApi4) {
       var ts = $scope.ts = CRM.ts('afform_order');
       var ctrl = this;
+
+      ctrl.saving = false;
+
+      // Read the header detail values from the Contribution af-entity's fields
+      // (two-way-bound to its af-fields). Empty when no detailsEntity is set.
+      function headerFields() {
+        if (!ctrl.detailsEntity || !ctrl.afForm || !ctrl.afForm.getData) {
+          return null;
+        }
+        var rows = ctrl.afForm.getData(ctrl.detailsEntity);
+        return (rows && rows[0] && rows[0].fields) ? rows[0].fields : {};
+      }
+
+      // Single Save for the installment scope: write the header detail fields
+      // (Contribution.update from the af-entity) FIRST, then broadcast the cart
+      // submit. Sequential on purpose - running both at once could let the header
+      // update clobber the totals the line-item modify recomputes. saving stays
+      // TRUE through the cart phase and is cleared when the cart resolves
+      // (handleSaved) or routes a veto (handleVeto). A header save error aborts
+      // the cart submit.
+      ctrl.save = function() {
+        if (ctrl.saving) { return; }
+        ctrl.saving = true;
+        var fields = headerFields();
+        var headerSave = (fields && !$.isEmptyObject(fields))
+          ? crmApi4('Contribution', 'update', {
+            where: [['id', '=', ctrl.contributionId]],
+            values: fields
+          })
+          : $q.when();
+        $q.when(headerSave).then(function() {
+          $rootScope.$broadcast('afOrderEditSave', { contributionId: ctrl.contributionId });
+        }, function(err) {
+          ctrl.saving = false;
+          CRM.alert(
+            (err && err.error_message) || ts('Could not save the contribution details.'),
+            ts('Error'), 'error'
+          );
+        });
+      };
 
       // Terminal message surfaced by a consumer's validate-metadata handler.
       // When set, the carts and toggle are hidden in favour of the banner. It
@@ -204,22 +262,18 @@
       // itself and alerted; forward the result to any bound consumer, then, if
       // we are hosted in a popup, close it and let the opener refresh.
       ctrl.handleSaved = function(result) {
+        ctrl.saving = false;
         if (ctrl.onSaved) {
           ctrl.onSaved({ result: result });
+        }
+        // Header-only coordinated save (no line changes): the cart stayed silent,
+        // so give the success feedback here. A real line-item save already
+        // alerted "Order updated" itself.
+        if (result && result.applied === false) {
+          CRM.alert(ts('Changes saved'), ts('Saved'), 'success');
         }
         // Deferred so the cart finishes its own success digest/reload first.
         $timeout(closePopupIfModal);
-      };
-
-      // A header-details save (af-order-details) is independent of the cart and
-      // does not restructure line items, so - unlike handleSaved - it does NOT
-      // close a hosting popup: staff typically save details and then go on to
-      // edit line items. The details panel shows its own success alert; we only
-      // forward onSaved so a consumer can react if it wants to.
-      ctrl.handleDetailsSaved = function(result) {
-        if (ctrl.onSaved) {
-          ctrl.onSaved({ result: result });
-        }
       };
 
       // When this editor is hosted inside a CRM popup (e.g. opened from a
@@ -268,6 +322,8 @@
       // back to a generic "not applied" notice so the change isn't dropped
       // silently.
       ctrl.handleVeto = function(metadata, contributionId, toAdd, toRemove) {
+        // Cart phase resolved (vetoed → routed); release the combined-Save state.
+        ctrl.saving = false;
         if (!ctrl.onValidateMetadata) {
           CRM.alert(ts('This change was not applied.'), ts('Not applied'), 'warning');
           return;
