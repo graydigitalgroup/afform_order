@@ -22,6 +22,8 @@
                 class="afo-cart-badge afo-cart-badge-membership">{{ ts('membership') }}</span>
           <span ng-if="$ctrl.isOverridden(row) && !$ctrl.isEdit"
                 class="afo-cart-badge afo-cart-badge-override">{{ ts('edited') }}</span>
+          <span ng-if="$ctrl.isLocked(row)"
+                class="afo-cart-badge afo-cart-badge-locked">{{ ts('locked') }}</span>
           <span ng-if="$ctrl.isPendingRemove(row)"
                 class="afo-cart-badge afo-cart-badge-removed">{{ ts('will be removed') }}</span>
           <!-- EDIT-MODE: optional removal reason, appended to the reversal
@@ -49,7 +51,7 @@
         <td class="afo-cart-num">{{ row.line_total | currency }}</td>
         <td class="afo-cart-actions">
           <button type="button" class="afo-cart-edit"
-                  ng-if="$ctrl.canOverride() && !$ctrl.isPendingRemove(row)"
+                  ng-if="$ctrl.canOverride() && !$ctrl.isPendingRemove(row) && !$ctrl.isLocked(row)"
                   ng-click="$ctrl.openEdit(row)"
                   title="{{ ts('Edit') }}">
             <i class="crm-i fa-pencil"></i>
@@ -62,7 +64,7 @@
           </button>
           <button type="button" class="afo-cart-remove"
                   ng-click="$ctrl.removeRow(row)"
-                  ng-if="!$ctrl.isAuto(row) && !$ctrl.isPendingRemove(row)"
+                  ng-if="!$ctrl.isAuto(row) && !$ctrl.isPendingRemove(row) && !$ctrl.isLocked(row)"
                   title="{{ ts('Remove') }}">
             <i class="crm-i fa-times"></i>
           </button>

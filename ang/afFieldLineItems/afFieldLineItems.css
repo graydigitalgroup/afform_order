@@ -95,6 +95,11 @@
   color: #2f6f2f;
 }
 
+.afo-cart-badge-locked {
+  background-color: #eee;
+  color: #777;
+}
+
 /* Remove button */
 .afo-cart-remove {
   background: none;
@@ -433,4 +438,31 @@
 
 .afo-edit-mode-note .crm-i {
   margin-right: 0.4em;
+}
+
+/* Contribution-header details panel (af-order-details), shown above the cart
+   in the installment edit scope. */
+.afo-order-details {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.afo-details-heading {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.afo-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 10px 16px;
+}
+
+.afo-details-receipt {
+  margin-top: 12px;
+}
+
+.afo-details-footer {
+  margin-top: 12px;
 }

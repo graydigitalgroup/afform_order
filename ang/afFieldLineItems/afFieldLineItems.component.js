@@ -110,7 +110,7 @@
       afForm: '?^^afForm'
     },
     templateUrl: '~/afFieldLineItems/afFieldLineItems.html',
-    controller: function($scope, $timeout, $q, crmApi4, afOrderCartChecks) {
+    controller: function($scope, $timeout, $q, crmApi4, afOrderCartChecks, afOrderLineLocks, afOrderPickerFilters) {
       var ts = $scope.ts = CRM.ts('afform_order');
       var ctrl = this;
 
@@ -127,6 +127,14 @@
       // makes the server preserve rather than regenerate the row; on other
       // rows it just drives the "edited" highlight.
       var OVERRIDE_FLAG = '_is_override';
+
+      // Locked-row marker. Set per row from the afOrderLineLocks registry when a
+      // consumer has registered a lock predicate (afform_order locks nothing
+      // itself). A locked row is read-only in the cart: qty/unit_price disabled,
+      // no edit pencil, no remove — it can only be changed through a
+      // consumer-owned flow. Cached on the row (predicates run at load/add time)
+      // rather than evaluated every digest.
+      var LOCK_FLAG = '_afo_locked';
 
       // ---- State ----------------------------------------------------------
       ctrl.cart = [];
@@ -213,6 +221,14 @@
       ctrl.$onInit = function() {
         ctrl.isEdit = !!ctrl.editMode;
 
+        // A consumer picker filter (afOrderPickerFilters) whose decision needed
+        // server data resolves asynchronously and broadcasts this when ready;
+        // rebuild the picker so the now-known answer takes effect. Registered for
+        // both create and edit modes (the picker exists in both).
+        $scope.$on('afOrderPickerRefresh', function() {
+          ctrl.buildPickerSelect2Data();
+        });
+
         // Resolve the cart field name. In input-type mode it is passed down
         // from the wrapping afField controller (cart-field-name="$ctrl.fieldName"
         // in LineItemCart.html); standalone callers may pass an explicit `name`
@@ -240,6 +256,17 @@
           // Rebuild picker select2 data on cart changes (same as create).
           $scope.$watchCollection(function() { return ctrl.cart; }, function() {
             ctrl.buildPickerSelect2Data();
+          });
+          // Generic reload seam: another component that mutated this
+          // contribution's lines out-of-band (e.g. a consumer allocation UI)
+          // can $broadcast 'afOrderCartReload' from $rootScope to make the cart
+          // re-load its lines, instead of forcing a full page refresh. We reload
+          // only when the event targets this contribution (or names none).
+          $scope.$on('afOrderCartReload', function(evt, data) {
+            var targetId = data && data.contributionId;
+            if (!targetId || String(targetId) === String(ctrl.editContributionId)) {
+              ctrl.loadExistingOrder(ctrl.editContributionId);
+            }
           });
           return;
         }
@@ -382,8 +409,23 @@
             claimedTypes[r._membership_type_id] = true;
           }
         });
+        // Context handed to consumer-registered picker filters (afOrderPickerFilters)
+        // so they can decide visibility per option (e.g. hide a price field unless
+        // the contribution qualifies). Resolved synchronously; see the service doc
+        // for the async-refresh contract (afOrderPickerRefresh).
+        var filterContext = {
+          contributionId: ctrl.editContributionId,
+          contributionStatus: ctrl.editContributionStatus,
+          isTemplate: ctrl.editIsTemplate,
+          isEdit: ctrl.isEdit,
+          cart: ctrl.cart
+        };
+        var hasPickerFilters = afOrderPickerFilters.has();
         ctrl.pickerSelect2Data = (ctrl.pickerOptions || []).filter(function(pfv) {
           if (pfv.membership_type_id && claimedTypes[pfv.membership_type_id]) {
+            return false;
+          }
+          if (hasPickerFilters && !afOrderPickerFilters.passes(pfv, filterContext)) {
             return false;
           }
           return true;
@@ -739,19 +781,38 @@
       };
 
       ctrl.isQtyEditable = function(row) {
-        return !row[AUTO_MARKER];
+        return !row[AUTO_MARKER] && !row[LOCK_FLAG];
       };
 
       ctrl.isUnitPriceEditable = function(row) {
         // Editable for any manually-added row — donations, price overrides,
-        // and other line items all need adjustable amounts. Only the
-        // auto-generated companion rows are locked.
-        return !row[AUTO_MARKER];
+        // and other line items all need adjustable amounts. Auto-generated
+        // companion rows and consumer-locked rows are not editable.
+        return !row[AUTO_MARKER] && !row[LOCK_FLAG];
       };
 
       ctrl.isAuto = function(row) {
         return !!row[AUTO_MARKER];
       };
+
+      // Whether a consumer lock predicate has flagged this row read-only.
+      ctrl.isLocked = function(row) {
+        return !!row[LOCK_FLAG];
+      };
+
+      // Stamp a row's lock flag from the registry. No-op (and leaves the flag
+      // falsy) when no consumer registered a predicate. Called as rows are built
+      // (loaded or session-added) so the flag is cached, not re-evaluated every
+      // digest. Context lets a predicate reason about the contribution.
+      function applyLock(row) {
+        row[LOCK_FLAG] = afOrderLineLocks.has() && afOrderLineLocks.isLocked(row, {
+          contributionId: ctrl.editContributionId,
+          contributionStatus: ctrl.editContributionStatus,
+          isTemplate: ctrl.editIsTemplate,
+          isEdit: ctrl.isEdit
+        });
+        return row;
+      }
 
       ctrl.isOverridden = function(row) {
         return !!row[OVERRIDE_FLAG];
@@ -1071,7 +1132,13 @@
           // Reconstruct companion links using the live companion engine, then
           // pin every loaded row. Both steps need the engine result, so chain.
           return ctrl.reconstructCompanionLinks().then(function() {
-            ctrl.cart.forEach(function(r) { r[OVERRIDE_FLAG] = true; });
+            // Pin every loaded row (preserve, don't regenerate) and stamp its
+            // lock flag now that the contribution context (status/template) is
+            // resolved, so consumer lock predicates can see it.
+            ctrl.cart.forEach(function(r) {
+              r[OVERRIDE_FLAG] = true;
+              applyLock(r);
+            });
             ctrl.persist();
             ctrl.loading = false;
           });
@@ -1384,6 +1451,14 @@
           var membershipId = row._existing_membership_id || row.entity_id;
           if (membershipId) { spec.entity_id = membershipId; }
           if (row._num_terms_per_unit) { spec._num_terms_per_unit = row._num_terms_per_unit; }
+        }
+        // Provenance for a CORRECTED line: a loaded row carries the id of the
+        // line it replaces. OrderAO.modify uses this to report the old->new
+        // pairing (OrderModifiedEvent) so a consumer can follow per-line links
+        // (e.g. soft credits) across the reverse-and-re-add. Session-added rows
+        // have no _line_item_id and so carry no replacement.
+        if (row._line_item_id) {
+          spec._replaces_line_item_id = row._line_item_id;
         }
         return spec;
       };
