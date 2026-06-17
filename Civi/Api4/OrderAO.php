@@ -107,6 +107,10 @@ class OrderAO extends AbstractEntity {
       // per-line edit affordances; gate it at view level so the call itself
       // succeeds for any contribute user (it returns the boolean either way).
       'canOverrideLineItems' => ['access CiviContribute'],
+      // Listing the receipt "from" addresses is a read-only lookup the
+      // contribution-details panel makes to populate its "Receipt From"
+      // select; view-level so it succeeds for any contribute user.
+      'getFromEmails' => ['access CiviContribute'],
       'meta' => ['access CiviContribute'],
       'default' => ['edit contributions'],
     ];

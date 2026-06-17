@@ -47,7 +47,13 @@
       // a falsy value to fall back to a generic "not applied" notice.
       onValidateMetadata: '&?',
       // Called after any successful save (either scope) with {result}.
-      onSaved: '&?'
+      onSaved: '&?',
+      // Optional consumer veto of the "Future installments" scope. Default
+      // (unset/true) offers it whenever the contribution has a live recur; a
+      // consumer binds FALSE to suppress it — e.g. a series whose installments
+      // are NOT generated from the core recur template (so editing the template
+      // would be meaningless). Only an explicit false hides the toggle.
+      allowFutureScope: '<?'
     },
     template:
       '<div class="af-order-edit">' +
@@ -55,7 +61,7 @@
           '<i class="crm-i fa-check-circle" aria-hidden="true"></i> ' +
           '<span ng-bind-html="$ctrl.terminalMessage"></span>' +
         '</div>' +
-        '<div class="af-order-edit-scope btn-group" role="group" ng-if="$ctrl.hasRecur && !$ctrl.terminalMessage">' +
+        '<div class="af-order-edit-scope btn-group" role="group" ng-if="$ctrl.hasRecur && $ctrl.allowFutureScope !== false && !$ctrl.terminalMessage">' +
           '<button type="button" class="btn btn-default" ' +
             'ng-class="{active: $ctrl.scope === \'installment\'}" ' +
             'ng-click="$ctrl.setScope(\'installment\')">' +
@@ -76,6 +82,10 @@
           '<i class="crm-i" ng-class="$ctrl.recurSummary.notified ? \'fa-check-circle\' : \'fa-exclamation-triangle\'" aria-hidden="true"></i> ' +
           '<span>{{ $ctrl.recurSummary.text }}</span>' +
         '</div>' +
+        '<af-order-details ng-if="$ctrl.scope === \'installment\' && $ctrl.contributionId && !$ctrl.terminalMessage" ' +
+          'contribution-id="$ctrl.contributionId" ' +
+          'on-saved="$ctrl.handleDetailsSaved(result)">' +
+        '</af-order-details>' +
         '<af-field-line-items ng-if="$ctrl.scope === \'installment\' && $ctrl.contributionId && !$ctrl.terminalMessage" ' +
           'edit-mode="true" ' +
           'edit-contribution-id="$ctrl.contributionId" ' +
@@ -199,6 +209,17 @@
         }
         // Deferred so the cart finishes its own success digest/reload first.
         $timeout(closePopupIfModal);
+      };
+
+      // A header-details save (af-order-details) is independent of the cart and
+      // does not restructure line items, so - unlike handleSaved - it does NOT
+      // close a hosting popup: staff typically save details and then go on to
+      // edit line items. The details panel shows its own success alert; we only
+      // forward onSaved so a consumer can react if it wants to.
+      ctrl.handleDetailsSaved = function(result) {
+        if (ctrl.onSaved) {
+          ctrl.onSaved({ result: result });
+        }
       };
 
       // When this editor is hosted inside a CRM popup (e.g. opened from a
