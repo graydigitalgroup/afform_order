@@ -6,12 +6,23 @@ use Civi\Afform\Event\AfformSubmitEvent;
 use Civi\Core\Event\GenericHookEvent;
 
 /**
+ * PRE-SAVE (create) — mutate the order here. Read-only post-create context
+ * belongs on {@see OrderCreatedEvent} (note the tense: Create = before,
+ * Created = after).
+ *
  * Dispatched by {@see \Civi\AfformOrder\Submit::saveContributionFromCart}
  * immediately before Order.create, so other extensions can adjust the order
  * built from a LineItemCart form without having to reimplement the submit
  * pipeline.
  *
- * Event name: civi.afform_order.alter_order  (see self::NAME)
+ * The modify-path counterpart is {@see OrderModifyEvent} (same mutate-before-save
+ * role for OrderAO.modify). Each phase has its own event rather than one
+ * action-discriminated event, so a create subscriber never receives a modify
+ * payload; shared logic (e.g. membership term counts) is factored into a
+ * callable both subscribers invoke. See HANDOFF-DECISIONS "Order lifecycle
+ * event family".
+ *
+ * Event name: civi.afform_order.create  (see self::NAME)
  *
  * Listeners may mutate:
  *  - the line items (getLineItems/setLineItems), and
@@ -34,9 +45,9 @@ use Civi\Core\Event\GenericHookEvent;
  * months, annual => 12 months) — logic specific to how it prices memberships
  * and therefore not in this extension.
  */
-class AlterOrderEvent extends GenericHookEvent {
+class OrderCreateEvent extends GenericHookEvent {
 
-  public const NAME = 'civi.afform_order.alter_order';
+  public const NAME = 'civi.afform_order.create';
 
   private array $lineItems;
 

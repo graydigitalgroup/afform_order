@@ -117,7 +117,7 @@ Two listeners on the Afform submit event:
   extras (`getApiRequest()->getValues()['extra']['fields']` — afForm submits
   extras as a single object, not the per-entity record list that
   `AbstractProcessor` synthesises), recomputes companions one final time,
-  builds line items, builds recur values, dispatches the `AlterOrderEvent`,
+  builds line items, builds recur values, dispatches the `OrderCreateEvent`,
   and runs `Order.create`. The new contribution id is set on the submit event
   so the redirect URL token `[Contribution1.0.id]` resolves correctly.
 
@@ -176,7 +176,7 @@ edit form.
 These are how a consumer extension layers business rules onto the generic
 engine without forking it.
 
-### Server: `Civi\AfformOrder\Event\AlterOrderEvent`
+### Server: `Civi\AfformOrder\Event\OrderCreateEvent`
 
 Fires from `Submit` just before `Order.create`, with mutable line items + recur
 values and read-only context (cart, extras, contribution, original submit
@@ -184,15 +184,23 @@ event). Use it for any per-deployment Order shaping — e.g. setting
 `membership_num_terms = qty × base` so the membership term tracks quantity, or
 applying business-specific overrides.
 
+Its modify-path counterpart is `OrderModifyEvent` (same mutate-before-save role
+for `OrderAO.modify`). They are distinct events, not one action-discriminated
+event, so a create subscriber never receives a modify payload; shape shared
+logic as a callable both subscribers invoke (e.g. a `computeMembershipTerms()`
+helper). See HANDOFF-DECISIONS "Order lifecycle event family". (Naming: bare
+verb = pre-save mutate seam; the past-tense `OrderCreatedEvent` is the
+read-only post-create seam.)
+
 ```php
-use Civi\AfformOrder\Event\AlterOrderEvent;
+use Civi\AfformOrder\Event\OrderCreateEvent;
 use Civi\Core\Service\AutoSubscriber;
 
 class MyOrderSubscriber extends AutoSubscriber {
   public static function getSubscribedEvents(): array {
-    return [AlterOrderEvent::NAME => 'shapeOrder'];
+    return [OrderCreateEvent::NAME => 'shapeOrder'];
   }
-  public function shapeOrder(AlterOrderEvent $event): void {
+  public function shapeOrder(OrderCreateEvent $event): void {
     $lineItems = $event->getLineItems();
     // ...mutate...
     $event->setLineItems($lineItems);
@@ -207,11 +215,11 @@ cart recompute, after stripping all previously auto-generated rows. Each
 subscribed provider appends rows for any drivers in its scope; the resulting
 cart is what the directive renders and what the submit pipeline records.
 
-When to use this vs. `AlterOrderEvent`:
+When to use this vs. `OrderCreateEvent`:
 - **`ComputeCompanionsEvent`** — *generation* of companion lines (a derived
   row that follows from another row). Fires repeatedly during cart editing.
   Must be idempotent.
-- **`AlterOrderEvent`** — *final shaping* of the order at submit time
+- **`OrderCreateEvent`** — *final shaping* of the order at submit time
   (membership term scaling, contribution-level overrides, etc.). Fires once
   per submit.
 
@@ -282,6 +290,84 @@ Multiple providers can be active simultaneously — each appends independently.
 If two providers shouldn't both fire for the same driver, gate that in each
 provider's own logic (e.g. check whether another provider's marker is already
 on a companion for the same driver).
+
+### Server: `Civi\AfformOrder\Event\OrderModifyValidateEvent`
+
+Fired by `OrderAO.modify` **before any line/financial writes**, so a consumer
+can inspect a proposed change to an existing order and veto it. This is the
+seam that lets a deployment impose policy on edits — most importantly, on edits
+to a **paid** contribution — without putting any of that policy in the engine.
+`afform_order` ships **no** listener: with none, a modify proceeds (generic
+"just works").
+
+The event carries the proposed `lineItemsToAdd` / `lineItemsToRemove`, the
+current contribution status, a net-effect classification
+(`increase` / `net_zero` / `decrease`, via `isRefundProducing()`), and a
+caller-declared `context` + `contextDetail`. The context is a **coordination
+signal, not authorization**: a subscriber that cares must independently verify
+it (e.g. confirm an approved refund request actually exists) rather than trust
+the string.
+
+```php
+use Civi\AfformOrder\Event\OrderModifyValidateEvent;
+use Civi\Core\Service\AutoSubscriber;
+
+class MyModifyGate extends AutoSubscriber {
+  public static function getSubscribedEvents(): array {
+    return [OrderModifyValidateEvent::EVENT_NAME => 'gate'];
+  }
+  public function gate(OrderModifyValidateEvent $event): void {
+    if (!$event->isRefundProducing()) {
+      return; // only police refunds; increases/net-zero pass
+    }
+    // ...verify context / records, then either allow (return) or veto...
+    $event->addError('This refund must go through the approval flow.');
+  }
+}
+```
+
+**Conveying a structured outcome (generic metadata).** Sometimes a veto isn't
+just "no" — the subscriber knows what *should* happen instead (e.g. "this
+reduction to a paid contribution should become a refund request, and here is
+the intended change") and wants to tell the caller. The event carries a
+**neutral metadata bag** for exactly this, modelled on core's
+`Civi\Order\Event\OrderCompleteEvent::$params`:
+
+- `setMetadata($key, $value)` / `getMetadata($key, $default)` /
+  `hasMetadata($key)` / `getAllMetadata()` — attach and read arbitrary
+  structured data. **`afform_order` defines no keys and interprets none.** A
+  consumer and its own client agree on key names (namespace them to avoid
+  collisions, e.g. `refund_required`).
+- On a veto, `OrderAO.modify` relays the whole bag to the caller on the thrown
+  exception under `error_data.validate_metadata`, so a UI can branch on a
+  consumer's outcome without the engine ever knowing what it means.
+
+```php
+// In a consumer's gate, vetoing AND conveying intent:
+$event->addError('This reduction must go through the refund flow.');
+$event->setMetadata('refund_required', [
+  'contribution_id'      => $event->getContributionID(),
+  'net_delta'            => $event->getNetDelta(),
+  'line_items_to_remove' => $event->getLineItemsToRemove(),
+  'line_items_to_add'    => $event->getLineItemsToAdd(),
+]);
+```
+
+The edit cart (`<af-field-line-items>`) forwards any `validate_metadata` to its
+optional `on-refund-required` callback, so a host wrapper can act on a
+consumer's key (create a record, open a form, etc.). The convention of *what a
+key means and what shape its value takes* lives entirely in the consumer
+extension that set it (typically a small static helper that owns the key name
+and payload shape). The engine only provides the channel; whether a
+refund-producing edit is blocked, and what a blocked edit becomes, is entirely
+the consumer's policy. A consumer that wants the inline reversal to just happen
+simply doesn't listen.
+
+This split is deliberate and forward-looking: when core's `OrderValidateEvent`
+lands with its own metadata/`params` bag, the consumer's routing helper reads
+and writes *that* bag instead, and the first-class engine surface (the generic
+validate primitive) converges with core while the consumer-specific routing
+stays in the consumer.
 
 ### Client: `afOrderCartChecks` registry
 
@@ -380,6 +466,31 @@ redirect-by-id are all handled by `afform_order`.
   supports recurring needs to translate the saved `ContributionRecur` into
   `doPayment`'s `is_recur` / `contributionRecurID` / frequency keys. A shared
   helper would DRY this up across processors.
+- **No persisted link between a reversal line and the line it reverses.** When
+  a line on a paid contribution is changed or removed, the change is recorded
+  as a negative-`unit_price` reversal line (an ordinary create) sitting beside
+  the original; the original is never deleted. Nothing stores *which* original
+  a given reversal backs out — the reversal copies the original's
+  `price_field_value_id` and negates the amount, but carries no explicit
+  back-reference. With a single edit this is unambiguous, but after several
+  edits over time (e.g. reverse $100 → re-add $80 → reverse $80 → re-add $90)
+  the ledger is a sum of many legitimate reversals from which "is *this*
+  specific line already reversed/refunded?" cannot be reconstructed: the net is
+  neither zero nor the original amount, and gating on remaining amount is wrong
+  because a legitimate partial leaves less than a subsequent full change would
+  need. Consequences: (a) a contribution view cannot reliably pair a reversal
+  with its original for display; (b) refund reconciliation cannot say which
+  reversal corresponds to which refunded line; (c) there is no exact guard
+  against reversing/refunding the same line twice. This is a pre-existing core
+  gap (core's Order/LineItem reversals carry no back-link either) that this
+  edit flow surfaces rather than introduces. **Current mitigation:** the edit
+  flow uses optimistic-concurrency — it snapshots the contribution's line-item
+  id set when the edit form is opened and aborts the whole submit if that set
+  has changed by save time ("this contribution was changed since you opened it;
+  reload and try again"), which prevents acting on stale state but does not
+  provide per-line double-reversal protection. **Eventual fix:** persist an
+  explicit "reverses line item N" reference (ideally in core) so reversal
+  provenance is exact.
 
 ---
 
@@ -393,7 +504,12 @@ afform_order/
 │       ├── CartForm.php                            # name-free cart detection
 │       ├── CompanionLogic.php                      # orchestrator (strip + dispatch)
 │       ├── Event/
-│       │   ├── AlterOrderEvent.php                 # final-shaping seam (submit)
+│       │   ├── OrderCreateEvent.php                # pre-save create mutate seam
+│       │   ├── OrderCreatedEvent.php               # post-create read-only seam
+│       │   ├── OrderModifyEvent.php                # pre-save modify mutate seam
+│       │   ├── OrderModifyValidateEvent.php        # modify validate/veto seam
+│       │   ├── OrderLineReversedEvent.php          # reversal provenance seam
+│       │   ├── OrderFinancialAccountResolveEvent.php  # account resolution seam
 │       │   └── ComputeCompanionsEvent.php          # companion-generation seam
 │       └── Submit.php                              # validate + submit subscribers
 ├── Civi/Api4/

@@ -19,6 +19,7 @@ use Civi\Api4\Generic\DAOGetFieldsAction;
 use Civi\Api4\Generic\DAOSaveAction;
 use Civi\Api4\Generic\DAOUpdateAction;
 use Civi\Api4\Action\OrderLineItem\Create;
+use Civi\Api4\Action\OrderLineItem\Delete;
 use Civi\Api4\Utils\CoreUtil;
 
 /**
@@ -48,7 +49,11 @@ class OrderLineItem extends Generic\DAOEntity {
    */
   public static function permissions() {
     $permissions = parent::permissions();
-    $permissions['save'] = $permissions['update'] = $permissions['delete'] = \CRM_Core_Permission::ALWAYS_DENY_PERMISSION;
+    // save and update remain denied: this entity exposes create + delete only.
+    $permissions['save'] = $permissions['update'] = \CRM_Core_Permission::ALWAYS_DENY_PERMISSION;
+    // delete is allowed but gated: removing a line tears down its FinancialItems,
+    // which is a contribution-level financial edit.
+    $permissions['delete'] = ['edit contributions'];
     return $permissions;
   }
 
@@ -103,10 +108,10 @@ class OrderLineItem extends Generic\DAOEntity {
 
   /**
    * @param bool $checkPermissions
-   * @return DAODeleteAction
+   * @return Delete
    */
   public static function delete($checkPermissions = TRUE) {
-    return (new DAODeleteAction(static::getEntityName(), __FUNCTION__))
+    return (new Delete(static::getEntityName(), __FUNCTION__))
       ->setCheckPermissions($checkPermissions);
   }
 

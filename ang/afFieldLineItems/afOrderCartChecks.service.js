@@ -4,7 +4,7 @@
   /**
    * afOrderCartChecks — a small client-side registry of advisory "checks" for
    * the line-item cart, the Angular analogue of the server-side
-   * Civi\AfformOrder\Event\AlterOrderEvent seam.
+   * Civi\AfformOrder\Event\OrderCreateEvent seam.
    *
    * Consumer extensions register a check from a module .run() block:
    *

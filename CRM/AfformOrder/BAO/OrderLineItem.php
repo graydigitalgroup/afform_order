@@ -66,13 +66,39 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
       $record['line_total'] = $record['qty'] * $record['unit_price'];
     }
 
+    // A line item needs BOTH price_field_value_id and price_field_id. The field
+    // is strictly determined by the value (each value belongs to exactly one
+    // field), so derive it when only the value was supplied. Without this, core
+    // fatals later trying to title/recalc the line: getPriceFieldSpec() is typed
+    // int and receives a null price_field_id (CRM_Financial_BAO_Order ~L1532).
+    if (!empty($record['price_field_value_id']) && empty($record['price_field_id'])) {
+      $record['price_field_id'] = \Civi\Api4\PriceFieldValue::get(FALSE)
+        ->addSelect('price_field_id')
+        ->addWhere('id', '=', $record['price_field_value_id'])
+        ->execute()
+        ->first()['price_field_id'] ?? NULL;
+      if (empty($record['price_field_id'])) {
+        throw new CRM_Core_Exception('Could not resolve price_field_id from price_field_value_id ' . $record['price_field_value_id']);
+      }
+    }
+
     if (empty($record['id']) && !isset($record['line_total'])) {
       throw new CRM_Core_Exception('line_total is required for LineItem create');
     }
 
     // Set tax amount if applicable
     if (isset($record['financial_type_id'], $record['line_total'])) {
-      $record['tax_amount'] = self::getTaxAmountForLineItem($record);
+      // For a reversal we want the EXACT negated stored tax passed by the caller
+      // (so the reversal cancels the original to the cent). Recomputing from
+      // line_total would discard any manual/rounding difference the original
+      // carried. So if this is a reversal and tax_amount was supplied, keep it;
+      // otherwise compute as normal.
+      if (!empty($record['isReversal']) && isset($record['tax_amount'])) {
+        // keep caller-supplied tax_amount as-is
+      }
+      else {
+        $record['tax_amount'] = self::getTaxAmountForLineItem($record);
+      }
     }
 
     $event->params = $record;
@@ -126,14 +152,38 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
         $trxnIDs['id'] = CRM_Core_BAO_FinancialTrxn::getFinancialTrxnId($lineItem->contribution_id, 'ASC', TRUE)['financialTrxnId'];
       }
 
-      CRM_Financial_BAO_FinancialItem::add($lineItem, $contributionBAO, FALSE, $trxnIDs);
+      $financialItem = CRM_Financial_BAO_FinancialItem::add($lineItem, $contributionBAO, FALSE, $trxnIDs);
       if (!empty($lineItem->tax_amount)) {
         CRM_Financial_BAO_FinancialItem::add($lineItem, $contributionBAO, TRUE, $trxnIDs);
       }
-      // @todo Ok, so we've created the FinancialItems, but now the calling code might do it again..
+      // FinancialItem::add unconditionally derives the (non-tax) account from the
+      // financial type via the 'Income Account is' relationship - it ignores any
+      // account we pre-set. So we correct it AFTER the fact: resolve AP-first/
+      // Income-fallback (with override event) and, only when that differs from
+      // what add() used, update the one FinancialItem's account. In the common
+      // Income-only setup the resolver returns the same Income account add()
+      // already used, so this is a no-op; the AP branch only fires when a price
+      // field's financial type actually has an 'Accounts Payable Account is'.
+      // We touch only the non-tax item, matching established practice; the tax
+      // item keeps core's 'Sales Tax Account is'.
+      $resolvedAccountID = self::resolveFinancialAccount((int) $lineItem->financial_type_id, !empty($record['isReversal']));
+      if ($financialItem && $resolvedAccountID && (int) $financialItem->financial_account_id !== $resolvedAccountID) {
+        \Civi\Api4\FinancialItem::update(FALSE)
+          ->addWhere('id', '=', $financialItem->id)
+          ->addValue('financial_account_id', $resolvedAccountID)
+          ->execute();
+      }
+      // OrderLineItem is canonical for FinancialItem creation: callers (OrderAO.modify,
+      // consumer workflows) express intent in line-item terms and must NOT call
+      // FinancialItem::add themselves. A negative-unit_price line flows through this
+      // same branch and yields correctly-signed negative FinancialItem(s) with no
+      // special-casing, which is how reversals are represented.
     }
     else {
-      // @todo We're updating a LineItem. What should we do with FinancialItems etc?
+      // Update of an existing LineItem. We deliberately do nothing to FinancialItems
+      // here: a paid line's financial history is immutable, and value changes are
+      // modelled as reverse-and-re-add (a delete + create pair) by the orchestrator,
+      // not as in-place edits. See self_hook_civicrm_delete for the teardown side.
     }
 
     if ($lineItem->entity_table === 'civicrm_membership' && $lineItem->contribution_id && $lineItem->entity_id) {
@@ -174,6 +224,38 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
   }
 
   /**
+   * Resolve the financial account to use for a line item's (non-tax)
+   * FinancialItem.
+   *
+   * Default resolution is AP-first / Income-fallback: the
+   * "Accounts Payable Account is" account for the financial type if one is
+   * configured, otherwise the "Income Account is" account. This is a safe
+   * generic default - installs that only want Income simply never configure AP
+   * on a financial type, so only the fallback ever fires; the AP branch
+   * activates only when AP was deliberately set up.
+   *
+   * The resolved default is then passed through an override event
+   * (OrderFinancialAccountResolveEvent on 'civi.afform_order.resolve_financial_account')
+   * so other extensions can adjust it. Most installs need no listener.
+   *
+   * @param int $financialTypeID
+   * @param bool $isReversal Whether this is for a paid-line reversal.
+   *
+   * @return int|null The financial account id to use, or NULL if neither
+   *   relationship is configured (caller/core will then fall back to its own
+   *   default behaviour).
+   */
+  public static function resolveFinancialAccount(int $financialTypeID, bool $isReversal = FALSE): ?int {
+    $accountID = \CRM_Financial_BAO_FinancialAccount::getFinancialAccountForFinancialTypeByRelationship($financialTypeID, 'Accounts Payable Account is')
+      ?: \CRM_Financial_BAO_FinancialAccount::getFinancialAccountForFinancialTypeByRelationship($financialTypeID, 'Income Account is');
+    $accountID = $accountID ? (int) $accountID : NULL;
+
+    $event = new \Civi\AfformOrder\Event\OrderFinancialAccountResolveEvent($financialTypeID, $accountID, $isReversal);
+    \Civi::dispatcher()->dispatch(\Civi\AfformOrder\Event\OrderFinancialAccountResolveEvent::EVENT_NAME, $event);
+    return $event->getFinancialAccountID();
+  }
+
+  /**
    * Create or update a record from supplied params.
    *
    * If 'id' is supplied, an existing record will be updated
@@ -202,7 +284,7 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
     }, $record);
 
     // \CRM_Utils_Hook::pre($op, $entityName, $record[$idField] ?? NULL, $record);
-    $event = new \Civi\Core\Event\PreEvent($op, $entityName, $record[$idField], $record);
+    $event = new \Civi\Core\Event\PreEvent($op, $entityName, $record[$idField] ?? NULL, $record);
     self::self_hook_civicrm_pre($event);
 
     // Fill defaults after pre hook to accept any hook modifications
@@ -226,6 +308,95 @@ class CRM_AfformOrder_BAO_OrderLineItem extends CRM_Price_DAO_LineItem implement
     self::self_hook_civicrm_post($event);
 
     return $instance;
+  }
+
+  /**
+   * Delete a LineItem, tearing down its FinancialItems first.
+   *
+   * Mirrors writeRecord(): routes through our own delete hook under the
+   * entity name "OrderLineItem" so the FinancialItem teardown stays owned
+   * by this BAO rather than the calling code.
+   *
+   * Only Pending (Unpaid) lines may be hard-deleted. A line whose
+   * FinancialItems are Paid / Partially paid carries real financial history
+   * that must not be destroyed; self_hook_civicrm_delete throws in that case.
+   * The orchestrator (Order.modify) is expected to detect the paid state up
+   * front and model the removal as a negative-unit_price reversal line
+   * (an ordinary create) instead of calling delete.
+   *
+   * @param array $record
+   *   Must contain the primary key ('id').
+   *
+   * @return static
+   * @throws \CRM_Core_Exception
+   */
+  public static function deleteRecord(array $record): CRM_Core_DAO {
+    $idField = static::$_primaryKey[0];
+    if (empty($record[$idField])) {
+      throw new CRM_Core_Exception('Cannot delete OrderLineItem without ' . $idField);
+    }
+    $entityName = 'OrderLineItem';
+
+    $instance = new static();
+    $instance->$idField = $record[$idField];
+    if (!$instance->find(TRUE)) {
+      throw new CRM_Core_Exception('OrderLineItem ' . $record[$idField] . ' not found');
+    }
+
+    \CRM_Utils_Hook::pre('delete', $entityName, $instance->$idField, $record);
+    $event = new \Civi\Core\Event\PreEvent('delete', $entityName, $instance->$idField, $record);
+    self::self_hook_civicrm_delete($event);
+
+    $instance->delete();
+
+    \CRM_Utils_Hook::post('delete', $entityName, $instance->$idField, $instance, $record);
+
+    return $instance;
+  }
+
+  /**
+   * Teardown of FinancialItems for a LineItem about to be deleted.
+   *
+   * Fired from deleteRecord() before the line row is removed. Refuses to
+   * proceed if any related FinancialItem is Paid / Partially paid, making
+   * destruction of paid financial history structurally impossible through
+   * this entity.
+   *
+   * @param \Civi\Core\Event\PreEvent $event
+   *
+   * @return void
+   * @throws \CRM_Core_Exception
+   */
+  public static function self_hook_civicrm_delete(\Civi\Core\Event\PreEvent $event): void {
+    if ($event->action !== 'delete') {
+      return;
+    }
+    $lineItemID = $event->id;
+
+    $financialItems = \Civi\Api4\FinancialItem::get(FALSE)
+      ->addSelect('id', 'status_id:name')
+      ->addWhere('entity_table', '=', 'civicrm_line_item')
+      ->addWhere('entity_id', '=', $lineItemID)
+      ->execute();
+
+    foreach ($financialItems as $financialItem) {
+      if (!in_array($financialItem['status_id:name'], ['Unpaid', NULL], TRUE)) {
+        throw new CRM_Core_Exception(
+          'OrderLineItem: cannot delete line ' . $lineItemID . ' because its FinancialItem ' .
+          $financialItem['id'] . ' is "' . $financialItem['status_id:name'] . '". Paid financial history ' .
+          'must be reversed (negative-unit_price line), not deleted.'
+        );
+      }
+    }
+
+    // All related FinancialItems are Unpaid (or none exist) - safe to hard-delete.
+    // EntityFinancialTrxn rows for an Unpaid item have no real payment allocation;
+    // removing the FinancialItem leaves no dangling money movement.
+    foreach ($financialItems as $financialItem) {
+      \Civi\Api4\FinancialItem::delete(FALSE)
+        ->addWhere('id', '=', $financialItem['id'])
+        ->execute();
+    }
   }
 
   /**

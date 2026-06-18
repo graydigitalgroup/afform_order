@@ -25,8 +25,13 @@ class OrderLineItemCreateSpecProvider extends AutoService implements Generic\Spe
    * @param \Civi\Api4\Service\Spec\RequestSpec $spec
    */
   public function modifySpec(RequestSpec $spec) {
-    // Not required if qty + unit_price are set
+    // line_total is derived from qty * unit_price in the BAO pre-hook.
     $spec->getFieldByName('line_total')->setRequired(FALSE);
+    // entity_table / entity_id are defaulted from contribution_id in the BAO
+    // pre-hook (a contribution line points at civicrm_contribution). Relax them
+    // here so the create required-field gate accepts minimal input.
+    $spec->getFieldByName('entity_table')->setRequired(FALSE);
+    $spec->getFieldByName('entity_id')->setRequired(FALSE);
     // If a contribution is deleted the lineItem will still exist. But we should always have a contribution
     //   when we create a lineItem
     // @fixme: But apparently CiviCRM core disagrees :-(

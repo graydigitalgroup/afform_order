@@ -6,11 +6,15 @@ use Civi\Afform\Event\AfformSubmitEvent;
 use Civi\Core\Event\GenericHookEvent;
 
 /**
+ * POST-SAVE (create) — read-only; the order already exists. To MUTATE the order
+ * before it saves, use {@see OrderCreateEvent} instead (note the tense: Created
+ * = after, Create = before).
+ *
  * Dispatched by {@see \Civi\AfformOrder\Submit::saveContributionFromCart}
  * immediately after Order.create returns and BEFORE the native Afform checkout
  * (which runs at priority -100) engages a payment processor.
  *
- * Event name: civi.afform_order.order_created  (see self::NAME)
+ * Event name: civi.afform_order.created  (see self::NAME)
  *
  * Why this seam exists: a generic post-create extension point for consumer
  * extensions that need to write to records Order.create just produced, before
@@ -23,7 +27,7 @@ use Civi\Core\Event\GenericHookEvent;
  *
  * Listeners see the lineItems with their private (underscore-prefixed) keys
  * intact - these carry cart-row data that doesn't belong on Order.create
- * itself, including any private flags consumers' own AlterOrderEvent listeners
+ * itself, including any private flags consumers' own OrderCreateEvent listeners
  * may have stamped on the lines. Use `price_field_value_id` to correlate a
  * carried line back to the saved entity (LineItem rows for the saved
  * contribution carry the entity id in `entity_id`).
@@ -47,7 +51,7 @@ use Civi\Core\Event\GenericHookEvent;
  */
 class OrderCreatedEvent extends GenericHookEvent {
 
-  public const NAME = 'civi.afform_order.order_created';
+  public const NAME = 'civi.afform_order.created';
 
   private int $contributionId;
 

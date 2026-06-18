@@ -1,0 +1,30 @@
+<af-form ctrl="afform">
+
+  <!--
+    Default "edit an order" form shipped by afform_order. Generic and
+    policy-free: a Contribution af-entity carries the header detail fields, and
+    <af-order-edit> hosts the line-item edit cart (plus, for a recurring series,
+    the installment/future-template scope toggle). The host's combined Save
+    reads the detail fields below (via details-entity) and writes them with
+    Contribution.update, then submits the line-item changes through
+    OrderAO.modify.
+
+    Reached as .../civicrm/order/edit#?Contribution1=<id> - the arg is the
+    af-entity name, which is how afform autofills it. Copy-and-modify freely;
+    add header fields to the fieldset as needed (status/financial-type changes
+    on an existing order carry financial side effects, so they are left out of
+    this conservative default).
+  -->
+
+  <af-entity type="Contribution" name="Contribution1" actions="{update: true}" url-autofill="1" />
+
+  <div af-fieldset="Contribution1" class="af-container af-layout-cols af-order-edit-details">
+    <af-field name="receive_date" defn="{label: 'Contribution Date', input_attrs: {time: false}}" />
+    <af-field name="source" />
+    <af-field name="receipt_date" defn="{input_attrs: {time: false}}" />
+    <af-field name="thankyou_date" defn="{input_attrs: {time: false}}" />
+  </div>
+
+  <af-order-edit contribution-id="routeParams.Contribution1" details-entity="Contribution1"></af-order-edit>
+
+</af-form>
