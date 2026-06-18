@@ -1,0 +1,65 @@
+<af-form ctrl="afform">
+
+  <!--
+    Default "create an order" form shipped by afform_order. It is intentionally
+    generic - core entities + this extension's own "Line Item Cart" input type
+    only - so a site installing afform_order on its own has a working order
+    create screen, and so consumer extensions have a copy-and-modify starting
+    point. Tweak freely (or clone into your own ext); nothing here is policy.
+  -->
+
+  <!-- Who the order is for. Autofilled from ?Contact1=<id> when present, or the
+       staff member picks an existing contact. -->
+  <af-entity type="Contact" name="Contact1" label="Contact" actions="{create: false, update: false}" security="RBAC" url-autofill="1" />
+
+  <af-entity type="Contribution" name="Contribution1" label="Contribution" actions="{create: true, update: false}" security="RBAC" data="{contact_id: 'Contact1'}" />
+
+  <fieldset af-fieldset="Contact1" class="af-container" af-title="Contact">
+    <af-field name="contact_id" defn="{input_type: 'EntityRef', label: 'Contact'}" />
+  </fieldset>
+
+  <!-- The Line Item Cart input type renders the cart directive and registers
+       the extra so its value survives submit; the afform_order submit
+       subscriber detects the form as cart-managed via this input type. -->
+  <af-field defn="{name: 'line_items', input_type: 'LineItemCart', label: 'Line Items'}" />
+
+  <fieldset af-fieldset="Contribution1" class="af-container" af-title="Contribution Details">
+    <div class="af-container af-layout-cols">
+      <af-field name="receive_date" defn="{afform_default: 'now', input_attrs: {time: false}}" />
+      <af-field name="financial_type_id" />
+      <af-field name="contribution_status_id" />
+    </div>
+    <div class="af-container af-layout-cols">
+      <af-field name="source" />
+      <af-field name="payment_instrument_id" />
+    </div>
+    <div class="af-container af-layout-cols">
+      <af-field name="trxn_id" />
+      <af-field name="check_number" />
+    </div>
+  </fieldset>
+
+  <fieldset class="af-container" af-title="Recurring Schedule">
+    <af-field defn="{name: 'is_recur', label: 'Make this a recurring contribution', input_type: 'CheckBox', data_type: 'Boolean'}" />
+    <div ng-if="afform.getFieldData().is_recur" class="af-container af-layout-cols">
+      <af-field defn="{name: 'recur_frequency', label: 'Frequency', input_type: 'Select', options: [{id: '1-week', label: 'Weekly'}, {id: '2-week', label: 'Every 2 weeks'}, {id: '4-week', label: 'Every 4 weeks'}, {id: '1-month', label: 'Monthly'}, {id: '3-month', label: 'Quarterly'}, {id: '6-month', label: 'Every 6 months'}, {id: '1-year', label: 'Annually'}]}" />
+      <af-field defn="{name: 'recur_installments', label: 'Installments', help_pre: 'Leave blank to run until cancelled.', input_type: 'Number'}" />
+    </div>
+  </fieldset>
+
+  <!-- Advisory cart warnings (registered by consumers via afOrderCartChecks).
+       With no checks registered this block is simply empty. -->
+  <div class="afo-cart-gate" ng-if="afform.afOrderCart &amp;&amp; afform.afOrderCart.line_items &amp;&amp; afform.afOrderCart.line_items.warnings().length">
+    <div class="afo-cart-warning" ng-repeat="w in afform.afOrderCart.line_items.warnings() track by $index">
+      <i class="crm-i fa-exclamation-triangle" aria-hidden="true"></i>
+      <span>{{ w }}</span>
+    </div>
+    <label class="afo-cart-confirm">
+      <input type="checkbox" ng-model="afform.afOrderCart.line_items.confirmed" />
+      <span>These quantities are intentional — proceed anyway.</span>
+    </label>
+  </div>
+
+  <button class="af-button btn btn-primary" crm-icon="fa-check" ng-click="afform.submit()" ng-if="afform.showSubmitButton" ng-disabled="!(afform.afOrderCart &amp;&amp; afform.afOrderCart.line_items &amp;&amp; afform.afOrderCart.line_items.hasRows()) || (afform.afOrderCart &amp;&amp; afform.afOrderCart.line_items &amp;&amp; afform.afOrderCart.line_items.needsConfirmation())">Save Contribution</button>
+
+</af-form>
