@@ -6,6 +6,7 @@ use Civi\Afform\Event\AfformSubmitEvent;
 use Civi\Afform\Event\AfformValidateEvent;
 use Civi\AfformOrder\Event\OrderCreateEvent;
 use Civi\AfformOrder\Event\OrderCreatedEvent;
+use Civi\AfformOrder\Event\OrderEditRoutedEvent;
 use Civi\Core\Service\AutoSubscriber;
 use CRM_AfformOrder_ExtensionUtil as E;
 
@@ -80,23 +81,38 @@ class Submit extends AutoSubscriber {
   }
 
   /**
+   * Is this submission an ORDER EDIT handled by us? The edit form embeds the
+   * cart via a wrapper component (NOT a LineItemCart input-type field), so it
+   * isn't recognised by CartForm; instead the afform-submit cart stashes its
+   * diff in the 'order_edit' extra, whose presence is the signal.
+   */
+  private function isOrderEditSubmission($event): bool {
+    return array_key_exists('order_edit', $this->getExtraFields($event));
+  }
+
+  /**
    * Disable the native CreateContribution pipeline for cart-managed forms +
    * this request, and apply our own "must have at least one line item" guard.
    */
   public function standDownNativeContribution(AfformValidateEvent $event): void {
+    $isEdit = $this->isOrderEditSubmission($event);
     $cartField = CartForm::getCartFieldName($event->getFormDataModel());
-    if ($cartField === NULL) {
+    // Neither a cart-create form nor an order-edit form -> not ours.
+    if ($cartField === NULL && !$isEdit) {
       return;
     }
 
     // Per-request: only this submission is being processed, so disabling here
-    // does not leak to other native contribution forms.
+    // does not leak to other native contribution forms. (An order edit must
+    // also stand the native create pipeline down - the Contribution already
+    // exists; native must not try to create a new one.)
     if (\Civi::container()->has(self::NATIVE_SERVICE)) {
       \Civi::service(self::NATIVE_SERVICE)->setActive(FALSE);
     }
 
-    // Mirror the native guard against our cart rather than its price fields.
-    if (!$this->getCart($event, $cartField)) {
+    // The "at least one line item" guard is a CREATE concern only; an edit may
+    // legitimately change only header fields (no line changes).
+    if (!$isEdit && !$this->getCart($event, $cartField)) {
       $this->addValidationError($event, E::ts('Add at least one line item before submitting.'));
     }
   }
@@ -124,6 +140,19 @@ class Submit extends AutoSubscriber {
     if ($event->getEntityType() !== 'Contribution') {
       return;
     }
+
+    // EDIT vs CREATE. An order-edit form is recognised by the 'order_edit' extra
+    // (the afform-submit cart stashed its diff there); it has NO LineItemCart
+    // input-type field, so this MUST be checked before the create-only cartField
+    // bail below. Route to the atomic editOrder path, never Order.create.
+    if ($this->isOrderEditSubmission($event)) {
+      $existingId = $event->getRecords()[0]['fields']['id'] ?? NULL;
+      if (!empty($existingId)) {
+        $this->editOrderFromCart($event, (int) $existingId);
+      }
+      return;
+    }
+
     $cartField = CartForm::getCartFieldName($event->getFormDataModel());
     if ($cartField === NULL) {
       return;
@@ -210,6 +239,89 @@ class Submit extends AutoSubscriber {
       $event
     );
     \Civi::dispatcher()->dispatch(OrderCreatedEvent::NAME, $created);
+  }
+
+  /**
+   * Apply an order EDIT from the form: the cart's line-item diff PLUS the
+   * Contribution header fields, via OrderAO.editOrder - one atomic,
+   * correctly-ordered (lines then header) operation. The create path's
+   * Order.create is NOT used for edits.
+   *
+   * CLIENT CONTRACT (approach (a) - the cart keeps its tested diff logic and
+   * hands the result over): the cart computes its diff (reusing toModifyAddSpec
+   * + its add/remove/replace marker rules) and writes it to the form's 'extra'
+   * bag under 'order_edit' (afForm.getFieldData().order_edit), shaped as:
+   *   {
+   *     lineItemsToAdd:       [ <OrderLineItem-create spec>, ... ],
+   *     lineItemsToRemove:    [ { id, removal_reason? }, ... ],
+   *     expectedLineItemIDs:  [ <loaded line ids> ],   // optimistic-concurrency
+   *     context:              'cart_edit',
+   *     contextDetail:        { ... }                  // optional
+   *   }
+   * It rides in the extra bag (NOT a declared <af-field>): afform.submit() posts
+   * the whole data model (values: data, including data.extra.fields) wholesale,
+   * and a declared Hidden field would validate/coerce the object value as a
+   * scalar and fail form validation. We read it here via
+   * getExtraFields()['order_edit'] ( = getValues()['extra']['fields']['order_edit'] ).
+   *
+   * The header fields are the Contribution record's own af-field values (incl.
+   * custom fields, e.g. the consumer's date field); editOrder sanitizes them
+   * (drops line-driven values, rejects payment/checkout fields, rejects a
+   * ->Completed status transition).
+   *
+   * A vetoed/routed change (e.g. a refund-producing edit a consumer's validate
+   * subscriber redirects) comes back from editOrder as a row with applied=FALSE
+   * plus a $validate_metadata bag; we relay it on the submission response for
+   * the client to act on.
+   *
+   * @param \Civi\Afform\Event\AfformSubmitEvent $event
+   * @param int $contributionId
+   */
+  private function editOrderFromCart(AfformSubmitEvent $event, int $contributionId): void {
+    $edit = $this->getExtraFields($event)['order_edit'] ?? [];
+
+    $headerFields = $event->getRecords()[0]['fields'] ?? [];
+    // The id identifies the target; it is not a value to write.
+    unset($headerFields['id']);
+
+    $result = \Civi\Api4\OrderAO::editOrder(FALSE)
+      ->setContributionID($contributionId)
+      ->setLineItemsToAdd($edit['lineItemsToAdd'] ?? [])
+      ->setLineItemsToRemove($edit['lineItemsToRemove'] ?? [])
+      ->setContributionFields($headerFields)
+      ->setExpectedLineItemIDs($edit['expectedLineItemIDs'] ?? [])
+      ->setContext($edit['context'] ?? 'cart_edit')
+      ->setContextDetail($edit['contextDetail'] ?? [])
+      ->execute();
+
+    // Publish the (existing) contribution id so downstream submit subscribers
+    // and the submission record can find it - mirrors create's setEntityId(0).
+    $event->setEntityId(0, $contributionId);
+
+    // A vetoed/routed change comes back as applied=FALSE + $validate_metadata
+    // (nothing was written). Fire the neutral OrderEditRoutedEvent so a consumer
+    // can interpret its own metadata, act on the routed change, and supply a
+    // completion message / redirect to surface on the afform submission response.
+    // afform_order names no metadata keys; it only forwards whatever message /
+    // redirect the consumer sets back onto the response.
+    if (($result->first()['applied'] ?? NULL) === FALSE) {
+      $routed = new OrderEditRoutedEvent(
+        $contributionId,
+        $edit['lineItemsToAdd'] ?? [],
+        $edit['lineItemsToRemove'] ?? [],
+        $result->validate_metadata ?? []
+      );
+      \Civi::dispatcher()->dispatch(OrderEditRoutedEvent::EVENT_NAME, $routed);
+
+      // The afform client renders submissionResponse[0].message as the
+      // confirmation and follows submissionResponse[0].redirect.
+      if ($routed->getMessage() !== NULL && method_exists($event->getApiRequest(), 'setResponseItem')) {
+        $event->getApiRequest()->setResponseItem('message', $routed->getMessage());
+      }
+      if ($routed->getRedirect() !== NULL && method_exists($event->getApiRequest(), 'setResponseItem')) {
+        $event->getApiRequest()->setResponseItem('redirect', $routed->getRedirect());
+      }
+    }
   }
 
   /**

@@ -11,6 +11,7 @@
  */
 
 namespace Civi\Api4;
+use Civi\Api4\Action\OrderAO\EditOrder;
 use Civi\Api4\Action\OrderAO\EnsureRecurTemplate;
 use Civi\Api4\Action\OrderAO\Modify;
 use Civi\Api4\Generic\AbstractEntity;
@@ -33,6 +34,9 @@ use Civi\Api4\Generic\BasicGetFieldsAction;
  *  - `ensureRecurTemplate` resolves (creating if necessary) the template
  *    contribution of a recurring series, so a caller can point `modify` at it
  *    to edit the series' future installments.
+ *  - `editOrder` applies a line-item change AND contribution header changes as
+ *    one atomic, correctly-ordered operation (modify lines, then header) - the
+ *    server-side keystone of the order-edit flow.
  *
  * This is NOT a DAO entity - it has no table of its own; it operates on an
  * existing Contribution. Retire in favour of core Order.modify when that lands.
@@ -48,6 +52,15 @@ class OrderAO extends AbstractEntity {
    */
   public static function modify($checkPermissions = TRUE): Modify {
     return (new Modify(static::getEntityName(), __FUNCTION__))
+      ->setCheckPermissions($checkPermissions);
+  }
+
+  /**
+   * @param bool $checkPermissions
+   * @return \Civi\Api4\Action\OrderAO\EditOrder
+   */
+  public static function editOrder($checkPermissions = TRUE): EditOrder {
+    return (new EditOrder(static::getEntityName(), __FUNCTION__))
       ->setCheckPermissions($checkPermissions);
   }
 
@@ -83,6 +96,12 @@ class OrderAO extends AbstractEntity {
           'title' => 'Line items to remove',
           'data_type' => 'Array',
         ],
+        [
+          'name' => 'contributionFields',
+          'title' => 'Contribution header fields',
+          'data_type' => 'Array',
+          'description' => 'Header field => value applied (after the line restructure) by editOrder.',
+        ],
       ];
     }))->setCheckPermissions($checkPermissions);
   }
@@ -95,6 +114,9 @@ class OrderAO extends AbstractEntity {
   public static function permissions(): array {
     return [
       'modify' => ['edit contributions'],
+      // Applying a line + header edit atomically is a contribution-level
+      // financial edit; same edit-level gate as modify.
+      'editOrder' => ['edit contributions'],
       // Resolving the template may CREATE a contribution (the template row),
       // so it carries the same edit-level gate as modify.
       'ensureRecurTemplate' => ['edit contributions'],

@@ -1090,7 +1090,8 @@ class Modify extends AbstractAction {
         $contributionID,
         $lineItemID,
         $reversalLineID,
-        -1 * (float) ($orig['line_total'] ?? 0)
+        -1 * (float) ($orig['line_total'] ?? 0),
+        $this->context
       );
       \Civi::dispatcher()->dispatch(OrderLineReversedEvent::EVENT_NAME, $reversedEvent);
     }

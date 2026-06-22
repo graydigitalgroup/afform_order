@@ -43,7 +43,12 @@
                  class="form-control afo-cart-input" />
         </td>
         <td class="afo-cart-num">
-          <input type="number" min="0" step="0.01" ng-model="row.unit_price"
+          <!-- No min="0": a loaded REVERSAL line carries a negative unit_price
+               (Modify::reverseLine negates it; qty stays positive). Now that the
+               cart rides afform.submit()'s ngForm.$valid gate, a min="0" here
+               flags that legitimate negative value invalid and blocks the whole
+               form. Negative line values are valid in the order domain. -->
+          <input type="number" step="0.01" ng-model="row.unit_price"
                  ng-change="$ctrl.onRowChange(row)"
                  ng-disabled="!$ctrl.isUnitPriceEditable(row)"
                  class="form-control afo-cart-input" />
@@ -104,11 +109,12 @@
     </span>
   </div>
 
-  <!-- EDIT-MODE footer: status-aware note + save button. The note tells staff
-       that on a paid contribution, changes are recorded as accounting
-       reversals/adjustments rather than silent deletes (OrderAO.modify picks
-       the path by status), or - on a recurring series' template - that changes
-       define FUTURE installments. The save button drives submitEdit(). -->
+  <!-- EDIT-MODE footer: status-aware note only. Tells staff that on a paid
+       contribution, changes are recorded as accounting reversals/adjustments
+       rather than silent deletes (OrderAO.modify picks the path by status), or
+       - on a recurring series' template - that changes define FUTURE
+       installments. There is no Save button here: the edit cart rides the host
+       afform's submit (afform-submit mode), so the form's own button saves. -->
   <div class="afo-edit-mode-footer" ng-if="$ctrl.isEdit">
     <p class="afo-edit-mode-note" ng-if="$ctrl.editIsTemplate">
       <i class="crm-i fa-info-circle"></i>
@@ -125,13 +131,6 @@
       <i class="crm-i fa-info-circle"></i>
       {{ ts('This contribution is %1. Changes are booked as accounting adjustments and do not move money on their own. Removing or reducing a line records a reversal, leaving a refund owed (Pending refund); adding or increasing a line leaves a balance due (Partially paid). Record the matching refund or payment separately to settle it.', { 1: $ctrl.editContributionStatus }) }}
     </p>
-    <button type="button" class="crm-button"
-            ng-if="!$ctrl.embedded"
-            ng-click="$ctrl.submitEdit()"
-            ng-disabled="$ctrl.editSaving || $ctrl.loading">
-      <i class="crm-i" ng-class="$ctrl.editSaving ? 'fa-spinner fa-spin' : 'fa-check'"></i>
-      {{ $ctrl.editSaving ? ts('Saving…') : ts('Save changes') }}
-    </button>
   </div>
 
   <!-- Per-line edit modal (inline overlay) -->
@@ -152,7 +151,9 @@
       <div class="afo-edit-field"
            ng-if="$ctrl.isAuto($ctrl.editModel)">
         <label>{{ ts('Unit Price') }}</label>
-        <input type="number" min="0" step="0.01" class="form-control"
+        <!-- No min="0": a reversed companion line carries a negative unit_price
+             (see the inline editor note above). -->
+        <input type="number" step="0.01" class="form-control"
                ng-model="$ctrl.editModel.unit_price" />
         <p class="afo-edit-help">
           {{ ts('Overrides the derived price for this companion line. Recompute will not regenerate it.') }}

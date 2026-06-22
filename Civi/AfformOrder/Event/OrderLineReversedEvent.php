@@ -75,21 +75,38 @@ class OrderLineReversedEvent extends Event {
   private float $reversalLineTotal;
 
   /**
+   * The caller-declared origin of the modify that produced this reversal (the
+   * OrderAO.modify `context`, e.g. 'cart_edit' or a consumer workflow's own
+   * identifier). '' when none was set. A coordination signal, not proof of
+   * anything - a recorder may store it for audit.
+   *
+   * @var string
+   */
+  private string $context;
+
+  /**
    * @param int $contributionID
    * @param int $originalLineItemID
    * @param int $reversalLineItemID
    * @param float $reversalLineTotal
+   * @param string $context
    */
   public function __construct(
     int $contributionID,
     int $originalLineItemID,
     int $reversalLineItemID,
-    float $reversalLineTotal
+    float $reversalLineTotal,
+    string $context = ''
   ) {
     $this->contributionID = $contributionID;
     $this->originalLineItemID = $originalLineItemID;
     $this->reversalLineItemID = $reversalLineItemID;
     $this->reversalLineTotal = $reversalLineTotal;
+    $this->context = $context;
+  }
+
+  public function getContext(): string {
+    return $this->context;
   }
 
   public function getContributionID(): int {
