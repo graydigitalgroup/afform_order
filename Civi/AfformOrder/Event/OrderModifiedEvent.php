@@ -37,7 +37,11 @@ use Symfony\Contracts\EventDispatcher\Event;
  * path a removed line is DELETED (it and its dependent rows are gone by the time
  * this fires - snapshot anything you need from it in OrderModifyEvent, which
  * fires first); on the paid path a removed line is REVERSED (the original
- * survives, readable here).
+ * survives, readable here). The reversals map carries each paid removal's
+ * original<->reversal pairing plus its amount + context - it absorbed the former
+ * per-line OrderLineReversedEvent, so a consumer re-establishing a credit or
+ * recording reversal provenance reads getReversals() here instead of binding a
+ * separate per-line event. Empty on the Pending path (no reversal lines).
  *
  * Informational, not vetoable: the restructure has already happened. A listener
  * that throws aborts the surrounding transaction, so listeners should record /
@@ -81,6 +85,19 @@ class OrderModifiedEvent extends Event {
   private array $replacements;
 
   /**
+   * The paid removals (reversals) made this modify. Each entry is self-contained:
+   * {original_line_item_id, reversal_line_item_id, reversal_line_total, context}.
+   * Empty on the Pending path (removals are deletions there). This is the
+   * aggregate that replaced the former per-line OrderLineReversedEvent - it
+   * carries everything that event did (amount + context), so a consumer can
+   * re-establish a credit / record provenance without a separate per-line seam.
+   *
+   * @var array<int, array{original_line_item_id:int, reversal_line_item_id:int,
+   *   reversal_line_total:float, context:string}>
+   */
+  private array $reversals;
+
+  /**
    * TRUE when the modified contribution is a recurring series' template.
    *
    * @var bool
@@ -92,6 +109,7 @@ class OrderModifiedEvent extends Event {
    * @param int[] $addedLineItemIDs
    * @param int[] $removedLineItemIDs
    * @param array<int, int> $replacements
+   * @param array<int, array> $reversals
    * @param bool $isTemplate
    */
   public function __construct(
@@ -99,12 +117,14 @@ class OrderModifiedEvent extends Event {
     array $addedLineItemIDs,
     array $removedLineItemIDs,
     array $replacements,
+    array $reversals,
     bool $isTemplate
   ) {
     $this->contributionID = $contributionID;
     $this->addedLineItemIDs = $addedLineItemIDs;
     $this->removedLineItemIDs = $removedLineItemIDs;
     $this->replacements = $replacements;
+    $this->reversals = $reversals;
     $this->isTemplate = $isTemplate;
   }
 
@@ -131,6 +151,15 @@ class OrderModifiedEvent extends Event {
    */
   public function getReplacements(): array {
     return $this->replacements;
+  }
+
+  /**
+   * @return array<int, array> Self-contained reversal records
+   *   {original_line_item_id, reversal_line_item_id, reversal_line_total, context}.
+   *   Empty on the Pending path.
+   */
+  public function getReversals(): array {
+    return $this->reversals;
   }
 
   public function isTemplate(): bool {

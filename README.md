@@ -508,7 +508,6 @@ afform_order/
 │       │   ├── OrderCreatedEvent.php               # post-create read-only seam
 │       │   ├── OrderModifyEvent.php                # pre-save modify mutate seam
 │       │   ├── OrderModifyValidateEvent.php        # modify validate/veto seam
-│       │   ├── OrderLineReversedEvent.php          # reversal provenance seam
 │       │   ├── OrderFinancialAccountResolveEvent.php  # account resolution seam
 │       │   └── ComputeCompanionsEvent.php          # companion-generation seam
 │       └── Submit.php                              # validate + submit subscribers
