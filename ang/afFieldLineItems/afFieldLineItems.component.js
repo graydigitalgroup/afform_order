@@ -89,28 +89,18 @@
       // for its subscriber to verify.
       editContext: '<',
       editContextDetail: '<',
-      // Optional callback invoked after a successful submitEdit(), so a host
-      // form (or a consumer workflow) can react (close dialog, refresh).
-      onEditSaved: '&?',
-      // Optional callback invoked when OrderAO.modify is vetoed by a
-      // validate subscriber that attached metadata (a consumer's gate attached
-      // structured outcome data via setMetadata). afform_order names no
-      // metadata keys and has no refund concept; it forwards the whole bag.
-      // A consumer extension binds this and interprets its own keys. Called with:
-      //   { metadata: <validate_metadata bag from the server>,
-      //     contributionId, toAdd, toRemove }
-      // NOTE the transport: a vetoed-with-metadata modify resolves as a
-      // SUCCESSFUL (200) result carrying res.validate_metadata - NOT a thrown
-      // error - because core's api4 AJAX page drops structured data from thrown
-      // exceptions. So this fires from the .then() of submitEdit, not .catch().
-      // If unbound, the cart surfaces the veto message(s) as a warning.
-      onRefundRequired: '&?',
-      // Edit-mode only. When TRUE the cart is EMBEDDED in a host that owns a
-      // single combined Save (e.g. <af-order-edit>): the cart hides its own
-      // footer Save button and instead runs submitEdit when the host broadcasts
-      // 'afOrderEditSave' — so header details + line items save under one click.
-      // Default (unset) keeps the cart's own button (standalone behaviour).
-      embedded: '<?'
+      // Edit-mode only. When TRUE the cart participates in the afform SUBMIT
+      // pipeline instead of calling OrderAO.modify itself: on load and on every
+      // change it stashes its computed line-item diff (+ the baseline loaded
+      // line ids for the server's concurrency check) into the form's 'extra' bag
+      // under 'order_edit' (NOT a declared field - a Hidden field would fail
+      // validation on the object value; the extra bag posts wholesale), which
+      // Civi\AfformOrder\Submit's edit branch forwards to OrderAO.editOrder
+      // (lines + header, atomically). This
+      // Civi\AfformOrder\Submit's edit branch forwards it to OrderAO.editOrder
+      // (lines + header, atomically). Set by the <af-order-edit-cart> host that
+      // the edit forms use. Default off, so the create path is unaffected.
+      afformSubmit: '<?'
     },
     require: {
       afForm: '?^^afForm'
@@ -203,7 +193,6 @@
       // simply omitted.
       ctrl.editRecurFrequencyText = null;
       ctrl.editRecurNextDate = null;
-      ctrl.editSaving = false;
       // Rows scheduled for removal in edit-mode are not spliced out (so staff
       // can see what will be reversed/deleted and undo it); they stay in the
       // cart with _pending_remove = TRUE and render struck-through. Companion
@@ -263,6 +252,19 @@
           $scope.$watchCollection(function() { return ctrl.cart; }, function() {
             ctrl.buildPickerSelect2Data();
           });
+          // afform-submit mode: keep the 'order_edit' diff current on ANY cart
+          // change. A DEEP watch is required (not $watchCollection above): a
+          // loaded line removed/edited in place is marked via _pending_remove /
+          // _dirty on the SAME row object (removeRow deliberately does not
+          // recompute, so persist()/stashEditDiff never fires otherwise), which
+          // a shallow collection watch misses - so the stashed diff stayed empty
+          // and modify saw netDelta 0 (no refund detected). Deep watch is cheap:
+          // carts are small and buildEditDiff does no I/O.
+          if (ctrl.afformSubmit) {
+            $scope.$watch(function() { return ctrl.cart; }, function() {
+              ctrl.stashEditDiff();
+            }, true);
+          }
           // Generic reload seam: another component that mutated this
           // contribution's lines out-of-band (e.g. a consumer allocation UI)
           // can $broadcast 'afOrderCartReload' from $rootScope to make the cart
@@ -274,18 +276,19 @@
               ctrl.loadExistingOrder(ctrl.editContributionId);
             }
           });
-          // When embedded in a host that owns the combined Save, run submitEdit
-          // on the host's broadcast instead of via our own footer button. The
-          // 'coordinated' flag keeps the "no changes to save" notice quiet — the
-          // host's save may be only header-detail changes, with no line edits.
-          if (ctrl.embedded) {
-            $scope.$on('afOrderEditSave', function(evt, data) {
-              var targetId = data && data.contributionId;
-              if (!targetId || String(targetId) === String(ctrl.editContributionId)) {
-                ctrl.submitEdit({ coordinated: true });
-              }
-            });
-          }
+          // Generic lock-refresh seam: a consumer lock predicate
+          // (afOrderLineLocks) whose decision needs server data resolves
+          // ASYNCHRONOUSLY (the rows are already loaded + locks applied with the
+          // not-yet-known answer). It $broadcasts 'afOrderLineLocksRefresh' when
+          // ready; we re-apply locks to the loaded rows in place (no full
+          // reload), mirroring the picker's afOrderPickerRefresh contract.
+          // Targeted by contribution id (or all when none named).
+          $scope.$on('afOrderLineLocksRefresh', function(evt, data) {
+            var targetId = data && data.contributionId;
+            if (!targetId || String(targetId) === String(ctrl.editContributionId)) {
+              ctrl.cart.forEach(applyLock);
+            }
+          });
           return;
         }
 
@@ -748,6 +751,10 @@
         if (ctrl.afForm && ctrl.afForm.getFieldData) {
           ctrl.afForm.getFieldData()[ctrl.name] = ctrl.cart;
         }
+        // In afform-submit edit mode, keep the line-item diff current in the
+        // 'order_edit' extra so a plain afform.submit() carries it (no pre-submit
+        // hook exists). No-op otherwise (create mode / non-afform-submit).
+        ctrl.stashEditDiff();
       };
 
       // ---- Computed helpers -----------------------------------------------
@@ -1114,10 +1121,15 @@
             var row = {
               price_field_id: li.price_field_id,
               price_field_value_id: li.price_field_value_id,
-              qty: li.qty,
-              unit_price: li.unit_price,
-              line_total: li.line_total,
-              tax_amount: li.tax_amount,
+              // Coerce to numbers: APIv4 returns money/numeric fields as strings
+              // ("10.00"), and the cart's <input type="number"> row editors mark
+              // a string model invalid - which blocks afform.submit() (the cart's
+              // inputs count toward the form's ngForm.$valid). parseFloat keeps
+              // them numeric; the diff/specs already parseFloat downstream.
+              qty: parseFloat(li.qty),
+              unit_price: parseFloat(li.unit_price),
+              line_total: parseFloat(li.line_total),
+              tax_amount: li.tax_amount != null ? parseFloat(li.tax_amount) : li.tax_amount,
               financial_type_id: li.financial_type_id,
               label: li.label,
               entity_table: li.entity_table,
@@ -1224,225 +1236,6 @@
         return chain;
       };
 
-      // Submit the edit: drive add/remove through OrderAO.modify. We know each
-      // row's intent directly — no field-by-field diff needed:
-      //   loaded + _pending_remove  -> remove (reversal/delete by status)
-      //   loaded + _dirty           -> reverse-and-readd (remove original + add
-      //                                current values; the model OrderAO.modify
-      //                                expects for a changed paid line)
-      //   loaded, untouched         -> nothing
-      //   session-added (no id)     -> add
-      // A FRESH live read is taken only as a safety check: skip a remove for a
-      // line that has already vanished (the order moved since load). It is not
-      // used to detect changes — the _dirty flag carries that.
-      ctrl.submitEdit = function(opts) {
-        // coordinated = invoked by a host's combined Save (see the embedded
-        // binding). When there are no line changes we stay silent rather than
-        // alerting "nothing to do" — the host's save may carry only header edits.
-        var coordinated = !!(opts && opts.coordinated);
-        if (!ctrl.isEdit || ctrl.editSaving) { return; }
-        if (!ctrl.editContributionId) {
-          CRM.alert(ts('No contribution to modify'), ts('Error'), 'error');
-          return;
-        }
-        ctrl.editSaving = true;
-
-        // Hoisted so the catch handler can pass the intended change to a
-        // refund-required consumer callback (the payload the refund request is
-        // built from is exactly what we sent).
-        var submittedToAdd = [];
-        var submittedToRemove = [];
-
-        // Fresh live read — the authority for what currently exists. Used to
-        // detect staleness (the contribution moved since the form was opened).
-        crmApi4('LineItem', 'get', {
-          select: ['id'],
-          where: [['contribution_id', '=', ctrl.editContributionId]]
-        }).then(function(liveLines) {
-          var liveIdList = (liveLines || []).map(function(li) { return String(li.id); }).sort();
-
-          // STALENESS GUARD (optimistic concurrency): if the set of line-item
-          // ids differs from what we loaded — any line added or removed by
-          // another actor since the form was opened — abort the WHOLE submit.
-          // We never try to merge or partially apply against state the staff
-          // member didn't see; acting on a stale picture risks double-reversal
-          // or re-adding an already-backed-out line. (Per-line double-reversal
-          // protection needs persisted reversal provenance — see README.)
-          //
-          // The "ids present at load" baseline is the cart itself: every loaded
-          // row still carries its _line_item_id (removed rows are marked
-          // _pending_remove, not spliced; edited rows keep their id), and rows
-          // added this session have no id. So we derive the baseline from the
-          // cart rather than caching a separate array.
-          var baseline = ctrl.cart
-            .filter(function(r) { return r && r._line_item_id; })
-            .map(function(r) { return String(r._line_item_id); })
-            .sort();
-          var diverged = baseline.length !== liveIdList.length ||
-            baseline.some(function(id, i) { return id !== liveIdList[i]; });
-          if (diverged) {
-            ctrl.editSaving = false;
-            CRM.alert(
-              ts('This contribution was changed since you opened it. Please reload and try again.'),
-              ts('Contribution changed'), 'error'
-            );
-            return;
-          }
-
-          var toAdd = [];
-          var toRemove = [];
-
-          ctrl.cart.forEach(function(row) {
-            var isLoaded = !!row._line_item_id;
-
-            // Removed loaded row -> remove by id (OrderAO.modify reverses or
-            // deletes by status). The staleness guard above already proved the
-            // line still exists, so no per-row presence check is needed. An
-            // optional removal reason annotates the reversal line's label.
-            if (isLoaded && row._pending_remove) {
-              var removeEntry = { id: row._line_item_id };
-              if (row._removal_reason && String(row._removal_reason).trim()) {
-                removeEntry.removal_reason = String(row._removal_reason).trim();
-              }
-              toRemove.push(removeEntry);
-              return;
-            }
-
-            // Session-added row (no provenance) -> add.
-            if (!isLoaded) {
-              if (row._pending_remove) { return; }
-              toAdd.push(ctrl.toModifyAddSpec(row));
-              return;
-            }
-
-            // Loaded row edited this session -> reverse-and-readd.
-            if (row._dirty) {
-              toRemove.push({ id: row._line_item_id });
-              toAdd.push(ctrl.toModifyAddSpec(row));
-            }
-          });
-
-          if (!toAdd.length && !toRemove.length) {
-            ctrl.editSaving = false;
-            // Coordinated save (host combined Save): the header details may have
-            // changed even though no line items did — stay quiet, still signal
-            // saved so the host can finish (close popup / refresh).
-            if (coordinated) {
-              if (ctrl.onEditSaved) { ctrl.onEditSaved({ result: { id: ctrl.editContributionId, applied: false } }); }
-            }
-            else {
-              CRM.alert(ts('No changes to save'), ts('Nothing to do'), 'info');
-            }
-            return;
-          }
-
-          // (A membership line with no existing membership is no longer blocked
-          // here: the engine creates a Pending membership from the line on
-          // every modify path — Pending, paid, and template. See
-          // Modify::resolveLineItemEntity / saveLineItemEntity.)
-
-          // Remember what we're submitting so the catch can hand it to a
-          // refund-required handler without rebuilding it.
-          submittedToAdd = toAdd;
-          submittedToRemove = toRemove;
-
-          var params = {
-            contributionID: ctrl.editContributionId,
-            lineItemsToAdd: toAdd,
-            lineItemsToRemove: toRemove,
-            // Context lets a subscriber (e.g. a refund-gate subscriber) reason
-            // about the origin. The generic engine allows by default; a
-            // consumer extension can veto a refund-producing edit unless it
-            // came from an approved request.
-            context: ctrl.editContext || 'cart_edit'
-          };
-          if (ctrl.editContextDetail) {
-            params.contextDetail = ctrl.editContextDetail;
-          }
-
-          return crmApi4('OrderAO', 'modify', params).then(function(res) {
-            ctrl.editSaving = false;
-
-            // OrderAO.modify resolves on a 200 even when a validate subscriber
-            // VETOED the change and attached engine-neutral metadata (e.g. a
-            // consumer's gate routing a refund-producing edit). That outcome is
-            // NOT an error and so does NOT arrive in .catch(); it rides on the
-            // result. The metadata bag is a top-level property the api4 AJAX
-            // layer forwards alongside `values` and crm.ajax.js's arrayObject()
-            // copies onto the resolved result - so read res.validate_metadata
-            // (NOT a row field, NOT the error path). The companion row carries
-            // applied=FALSE.
-            //
-            // This is the deliberate transport: a thrown CRM_Core_Exception is
-            // flattened by core's api4 AJAX page to message/code only, dropping
-            // any structured error data - so the bag could never survive the
-            // error path. A successful result is returned whole.
-            var metadata = (res && res.validate_metadata) || null;
-            if (metadata && !$.isEmptyObject(metadata)) {
-              if (ctrl.onRefundRequired) {
-                // afform_order names no keys in the bag; the bound consumer
-                // component interprets its own keys. We
-                // forward the whole bag plus the change we submitted, which is
-                // exactly what a refund request would be built from.
-                ctrl.onRefundRequired({
-                  metadata: metadata,
-                  contributionId: ctrl.editContributionId,
-                  toAdd: submittedToAdd,
-                  toRemove: submittedToRemove
-                });
-              }
-              else {
-                // No handler bound: surface the veto message(s) so the change
-                // isn't silently dropped. The not-applied row carries them.
-                var vetoRow = (res && res[0]) || {};
-                var msgs = (vetoRow.messages && vetoRow.messages.length)
-                  ? vetoRow.messages.join('\n')
-                  : ts('This change was not applied.');
-                CRM.alert(msgs, ts('Not applied'), 'warning');
-              }
-              // Nothing was written; leave the cart as-is so staff can adjust
-              // or retry. Do NOT reload (there is no new persisted state).
-              return;
-            }
-
-            // Applied normally.
-            CRM.alert(ts('Order updated'), ts('Saved'), 'success');
-            var savedRow = (res && res[0]) || {};
-            // A template edit also synced the recurring amount and asked the
-            // payment processor to amend the live subscription (best-effort,
-            // server-side). Surface that outcome: the local changes are saved
-            // either way, but "adjust at the processor manually" is an action
-            // staff must see, not silently drop.
-            if (savedRow.is_template && savedRow.processor_message) {
-              CRM.alert(
-                savedRow.processor_message,
-                savedRow.processor_notified ? ts('Subscription updated') : ts('Manual follow-up needed'),
-                savedRow.processor_notified ? 'success' : 'warning'
-              );
-            }
-            if (ctrl.onEditSaved) {
-              ctrl.onEditSaved({ result: (res && res[0]) || null });
-            }
-            // Reload so the cart reflects the new persisted state (reversal
-            // lines, new lines, recomputed totals).
-            ctrl.loadExistingOrder(ctrl.editContributionId);
-          });
-        }).catch(function(err) {
-          ctrl.editSaving = false;
-
-          // A THROWN error from OrderAO.modify is a genuine failure - either a
-          // hard veto with no metadata (e.g. an unverifiable refund-request
-          // context or a double-reversal collision) or an unexpected error.
-          // The refund-routing (veto WITH metadata) outcome does NOT come
-          // through here - it arrives as a successful result and is handled in
-          // the .then() above. So this branch just surfaces the message.
-          CRM.alert(
-            (err && err.error_message) || ts('Failed to save order changes'),
-            ts('Error'), 'error'
-          );
-        });
-      };
-
       // Build an OrderLineItem-create spec from a cart row, for OrderAO.modify's
       // lineItemsToAdd. Carries the price field linkage + computed totals;
       // OrderAO.modify forces contribution_id / entity_table / entity_id.
@@ -1491,6 +1284,55 @@
           spec._replaces_line_item_id = row._line_item_id;
         }
         return spec;
+      };
+
+      // Synchronous edit diff for the afform-submit path. Classifies each cart
+      // row by its markers (loaded+_pending_remove -> remove by id;
+      // session-added -> add; loaded+_dirty -> reverse-and-readd), plus the
+      // baseline loaded-line ids the server uses for its optimistic-concurrency
+      // check. Stashed into the 'order_edit' extra (see stashEditDiff) for the
+      // server editOrder branch to apply.
+      ctrl.buildEditDiff = function() {
+        var toAdd = [];
+        var toRemove = [];
+        var baseline = [];
+        ctrl.cart.forEach(function(row) {
+          var isLoaded = !!row._line_item_id;
+          if (isLoaded) { baseline.push(row._line_item_id); }
+          if (isLoaded && row._pending_remove) {
+            var removeEntry = { id: row._line_item_id };
+            if (row._removal_reason && String(row._removal_reason).trim()) {
+              removeEntry.removal_reason = String(row._removal_reason).trim();
+            }
+            toRemove.push(removeEntry);
+            return;
+          }
+          if (!isLoaded) {
+            if (row._pending_remove) { return; }
+            toAdd.push(ctrl.toModifyAddSpec(row));
+            return;
+          }
+          if (row._dirty) {
+            toRemove.push({ id: row._line_item_id });
+            toAdd.push(ctrl.toModifyAddSpec(row));
+          }
+        });
+        return { lineItemsToAdd: toAdd, lineItemsToRemove: toRemove, expectedLineItemIDs: baseline };
+      };
+
+      // Write the current edit diff into the form's 'extra' bag under
+      // 'order_edit' so afform.submit() carries it (posted wholesale) to the
+      // server editOrder branch. No-op unless in afform-submit edit mode.
+      ctrl.stashEditDiff = function() {
+        if (!ctrl.afformSubmit || !ctrl.isEdit || !ctrl.afForm || !ctrl.afForm.getFieldData) {
+          return;
+        }
+        var diff = ctrl.buildEditDiff();
+        diff.context = ctrl.editContext || 'cart_edit';
+        if (ctrl.editContextDetail) {
+          diff.contextDetail = ctrl.editContextDetail;
+        }
+        ctrl.afForm.getFieldData().order_edit = diff;
       };
 
       // ---- Utility --------------------------------------------------------

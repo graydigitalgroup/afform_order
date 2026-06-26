@@ -5,9 +5,10 @@ use CRM_AfformOrder_ExtensionUtil as E;
  * Default "edit order" form shipped by afform_order.
  *
  * A generic, policy-free starting point for editing an existing order: core
- * contribution header fields plus the <af-order-edit> line-item cart host.
- * Useful as-is on a stock install and as a copy-and-modify template for
- * consumer extensions (which can wrap <af-order-edit> to add their own policy).
+ * contribution header af-fields plus the <af-order-edit-cart> line-item cart
+ * host, saved atomically through the afform submit chain (OrderAO.editOrder).
+ * Useful as-is on a stock install and as a copy-and-modify template for consumer
+ * extensions (which can add their own policy fields / subscribers).
  *
  * Route: civicrm/order/edit#?Contribution1=<id>  (the arg is the af-entity
  * name). Rename the route if it collides with your own.

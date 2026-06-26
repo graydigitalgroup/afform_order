@@ -19,7 +19,6 @@ use Civi\Api4\OrderLineItem;
 use Civi\AfformOrder\Event\OrderModifyValidateEvent;
 use Civi\AfformOrder\Event\OrderModifyEvent;
 use Civi\AfformOrder\Event\OrderModifiedEvent;
-use Civi\AfformOrder\Event\OrderLineReversedEvent;
 use Civi\AfformOrder\ModifyResult;
 use Civi\Api4\Generic\AbstractAction;
 use Civi\Api4\Generic\Result;
@@ -68,6 +67,23 @@ use Civi\Api4\Generic\Result;
  *   - Connected-entity reconciliation (membership / participant) for *removed*
  *     lines is intentionally NOT performed here yet - it is policy that needs
  *     UI confirmation. See the marked seam below.
+ *
+ * Result row (one row). A VETOED paid modify writes nothing and returns
+ * {id, applied: FALSE, net_effect, net_delta, messages} with validate_metadata on
+ * the result object. An APPLIED modify returns the scalar summary
+ * {id, applied: TRUE, total_amount, tax_amount[, net_effect, net_delta][, is_template,
+ * contribution_recur_id, recur_amount, processor_notified, processor_message]} PLUS,
+ * for callers/tests that need to assert the outcome (see modifyResultDetails):
+ *   - contribution        the updated Contribution record
+ *   - line_items_added    lines the caller asked to add that were created (full
+ *                         entities; genuine adds + correction re-adds)
+ *   - line_items_reversed the negative reversal lines created to back out paid
+ *                         removals (full entities)
+ *   - line_items_removed  ids actually removed (deleted on Pending; original kept
+ *                         + reversed on paid)
+ *   - reversals           paid reversal records {original_line_item_id,
+ *                         reversal_line_item_id, reversal_line_total, context}
+ *   - replacements        [removedLineItemID => addedLineItemID] for corrections
  *
  * @method $this setContributionID(int $contributionID)
  * @method int getContributionID()
@@ -136,6 +152,51 @@ class Modify extends AbstractAction {
    * @var int[]
    */
   private array $modifyAddedLineIDs = [];
+
+  /**
+   * The line items the caller asked to ADD that were created this modify, as
+   * returned by OrderLineItem.create (full entity rows) - the add loop's output
+   * (genuine new lines AND correction re-adds, which arrive as lines-to-add).
+   * Accumulated alongside their ids so the result reports them without a re-fetch.
+   * REVERSAL lines are NOT here (see $modifyReversalLines) - they are created by
+   * reverseLine, not the add loop.
+   *
+   * @var array[]
+   */
+  private array $modifyAddedLines = [];
+
+  /**
+   * The negative REVERSAL line items created this modify to back out a paid
+   * "remove" (full entity rows from OrderLineItem.create). A paid removal keeps
+   * the original and creates one of these beside it, so they are a distinct kind
+   * of created line from the add loop's output.
+   *
+   * @var array[]
+   */
+  private array $modifyReversalLines = [];
+
+  /**
+   * The paid removals (reversals) made this modify, as self-contained records -
+   * each ties an original line to the reversal line that backed it out, and
+   * carries the full payload the (now-retired) per-line OrderLineReversedEvent
+   * used to: amount + the modify context. So a caller/test reading the result
+   * has everything the transaction-level event would have given.
+   *
+   * @var array<int, array{original_line_item_id:int, reversal_line_item_id:int,
+   *   reversal_line_total:float, context:string}>
+   */
+  private array $modifyReversals = [];
+
+  /**
+   * Ids of the line items ACTUALLY removed this modify - the originals that were
+   * reversed (paid) or deleted (Pending), recorded where the removal really
+   * happens rather than echoed from the lineItemsToRemove request. On the paid
+   * path these are the `original_line_item_id`s in `$modifyReversals`; on Pending
+   * they are the rows OrderLineItem.delete reported as deleted.
+   *
+   * @var int[]
+   */
+  private array $modifyRemovedLineIDs = [];
 
   /**
    * Map [removedLineItemID => addedLineItemID] for corrected lines, built from
@@ -377,7 +438,7 @@ class Modify extends AbstractAction {
         //    hook honours financial_trxn_id) rather than the original payment,
         //    and inherit the now-adjusted contribution status.
         foreach ($this->lineItemsToAdd as $lineItem) {
-          if (empty($lineItem['price_field_value_id'])) {
+          if (!$this->hasFieldRef($lineItem, 'price_field_value_id')) {
             throw new \CRM_Core_Exception(
               'Order modify: each lineItemsToAdd entry requires a price_field_value_id ' .
               '(a line item must reference a price field value).'
@@ -432,14 +493,14 @@ class Modify extends AbstractAction {
         $this->dispatchModified($contributionID, FALSE);
       });
 
-      $result[] = [
+      $result[] = $this->modifyResultDetails($contributionID, [
         'id' => $contributionID,
         'applied' => TRUE,
         'total_amount' => $totalAmount,
         'tax_amount' => $taxAmount,
         'net_effect' => $netEffect,
         'net_delta' => $netDelta,
-      ];
+      ]);
       return;
     }
 
@@ -475,9 +536,16 @@ class Modify extends AbstractAction {
         // Pending contribution's lines (the membership/participant + its payment
         // link can be removed). Not yet implemented here - tracked for the cart
         // edit UI work.
-        OrderLineItem::delete(FALSE)
+        $deleted = OrderLineItem::delete(FALSE)
           ->addWhere('id', '=', $lineItem['id'])
           ->execute();
+        // Record what was ACTUALLY deleted (empty if the id didn't resolve), so
+        // line_items_removed reflects reality, not the request.
+        foreach ($deleted as $deletedRow) {
+          if (!empty($deletedRow['id'])) {
+            $this->modifyRemovedLineIDs[] = (int) $deletedRow['id'];
+          }
+        }
       }
 
       // 4. Add requested lines. OrderLineItem::create makes the line and its
@@ -496,7 +564,7 @@ class Modify extends AbstractAction {
       //    reliably registered on this OrderLineItem create subclass and throws
       //    "Unknown api parameter: setValues". The array form is stable.
       foreach ($this->lineItemsToAdd as $lineItem) {
-        if (empty($lineItem['price_field_value_id'])) {
+        if (!$this->hasFieldRef($lineItem, 'price_field_value_id')) {
           throw new \CRM_Core_Exception(
             'Order modify: each lineItemsToAdd entry requires a price_field_value_id ' .
             '(a line item must reference a price field value).'
@@ -615,7 +683,53 @@ class Modify extends AbstractAction {
         $row['processor_message'] = $processorOutcome['message'];
       }
     }
-    $result[] = $row;
+    $result[] = $this->modifyResultDetails($contributionID, $row);
+  }
+
+  /**
+   * Enrich an applied-modify result row with the records a caller (or a unit
+   * test) needs to assert the outcome - the FULL picture of what changed.
+   * Additive: merged onto the row's existing scalar summary (id / applied /
+   * totals / net_effect / template fields), which existing consumers still read.
+   * All line entities are the rows OrderLineItem.create returned (no re-fetch).
+   *
+   *   - contribution        the updated Contribution record
+   *   - line_items_added    lines the caller asked to ADD that were created
+   *                         (genuine new lines + correction re-adds — both arrive
+   *                         as lines-to-add)
+   *   - line_items_reversed the negative REVERSAL lines created to back out paid
+   *                         removals (a paid remove keeps the original + creates
+   *                         one of these)
+   *   - line_items_removed  ids ACTUALLY removed (recorded where removal happens,
+   *                         not echoed from the request): DELETED on Pending; on
+   *                         paid the original is kept and `reversals` ties it to
+   *                         its reversal line
+   *   - reversals           paid reversal records, each {original_line_item_id,
+   *                         reversal_line_item_id, reversal_line_total, context}
+   *   - replacements        [removedLineItemID => addedLineItemID] for a
+   *                         correction (reverse/delete-and-re-add)
+   *
+   * So a paid line CORRECTION reports the original in line_items_removed, its
+   * negative line in line_items_reversed (tied via reversals), and the corrected
+   * line in line_items_added (tied via replacements) - nothing is hidden.
+   *
+   * @param int $contributionID
+   * @param array $row The scalar summary already built for this result.
+   * @return array
+   * @throws \CRM_Core_Exception
+   */
+  private function modifyResultDetails(int $contributionID, array $row): array {
+    return array_merge($row, [
+      'contribution' => Contribution::get(FALSE)
+        ->addWhere('id', '=', $contributionID)
+        ->execute()
+        ->first(),
+      'line_items_added' => $this->modifyAddedLines,
+      'line_items_reversed' => $this->modifyReversalLines,
+      'line_items_removed' => $this->modifyRemovedLineIDs,
+      'reversals' => $this->modifyReversals,
+      'replacements' => $this->modifyReplacements,
+    ]);
   }
 
   /**
@@ -659,6 +773,10 @@ class Modify extends AbstractAction {
       return;
     }
     $this->modifyAddedLineIDs[] = $newId;
+    // Keep the full create result so the action result can return the added line
+    // entities without re-querying - OrderLineItem.create already handed us the
+    // saved record.
+    $this->modifyAddedLines[] = $createdLine;
     if (!empty($replaces)) {
       $this->modifyReplacements[(int) $replaces] = $newId;
     }
@@ -678,17 +796,14 @@ class Modify extends AbstractAction {
    * @return void
    */
   private function dispatchModified(int $contributionID, bool $isTemplate): void {
-    $removedLineIDs = [];
-    foreach ($this->lineItemsToRemove as $lineItem) {
-      if (!empty($lineItem['id'])) {
-        $removedLineIDs[] = (int) $lineItem['id'];
-      }
-    }
     $event = new OrderModifiedEvent(
       $contributionID,
       $this->modifyAddedLineIDs,
-      $removedLineIDs,
+      // The lines ACTUALLY removed (reversed/deleted), same set the result
+      // reports - not an echo of the request.
+      $this->modifyRemovedLineIDs,
       $this->modifyReplacements,
+      $this->modifyReversals,
       $isTemplate
     );
     \Civi::dispatcher()->dispatch(OrderModifiedEvent::EVENT_NAME, $event);
@@ -747,6 +862,51 @@ class Modify extends AbstractAction {
   }
 
   /**
+   * Whether a line spec references the given field in ANY accepted form: the
+   * bare numeric key (`field`) or any APIv4 pseudoconstant of it (`field:name`,
+   * `field:label`, ...). Used to validate that a referenceable field is present
+   * without forcing the caller to pre-resolve it to an id - OrderLineItem.create
+   * resolves the pseudoconstant when it writes the line. A present-but-empty
+   * value does not count.
+   *
+   * @param array $lineItem
+   * @param string $field
+   * @return bool
+   */
+  private function hasFieldRef(array $lineItem, string $field): bool {
+    foreach ($lineItem as $key => $value) {
+      if (empty($value)) {
+        continue;
+      }
+      if ($key === $field || strpos($key, $field . ':') === 0) {
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
+
+  /**
+   * Whether a line carries a membership type in a form saveLineItemEntity will
+   * actually USE when creating the membership: the bare numeric
+   * `membership_type_id` (core's PriceFieldValue special-case), or any
+   * entity-prefixed pseudoconstant (`entity_id.membership_type_id`,
+   * `entity_id.membership_type_id:name`, ...) that flows to the entity save.
+   *
+   * A BARE `membership_type_id:name` deliberately does NOT count: it is neither
+   * picked up by the `entity_id.` carry-over nor by the bare-numeric special-case,
+   * so it would be silently dropped - the caller must supply the type as a bare
+   * numeric, an `entity_id.`-prefixed pseudoconstant, or via the price field value
+   * (from which we derive the numeric).
+   *
+   * @param array $lineItem
+   * @return bool
+   */
+  private function hasMembershipTypeForEntity(array $lineItem): bool {
+    return !empty($lineItem['membership_type_id'])
+      || $this->hasFieldRef($lineItem, 'entity_id.membership_type_id');
+  }
+
+  /**
    * Prep a new membership line before saveLineItemEntity, mirroring what
    * Order.create's pipeline / Submit.php do on the create path: ensure
    * membership_type_id (from the price field value) and default the new
@@ -757,14 +917,37 @@ class Modify extends AbstractAction {
    * @throws \CRM_Core_Exception
    */
   private function prepNewMembershipLine(array $lineItem): array {
-    if (empty($lineItem['membership_type_id']) && !empty($lineItem['price_field_value_id'])) {
-      $lineItem['membership_type_id'] = \Civi\Api4\PriceFieldValue::get(FALSE)
-        ->addSelect('membership_type_id')
-        ->addWhere('id', '=', $lineItem['price_field_value_id'])
-        ->execute()
-        ->first()['membership_type_id'] ?? NULL;
+    // saveLineItemEntity consumes the membership type in exactly two forms: the
+    // BARE numeric membership_type_id (core's PriceFieldValue special-case) or an
+    // entity-prefixed pseudoconstant (entity_id.membership_type_id[:name], which
+    // flows to the entity save and is resolved there). A BARE membership_type_id:name
+    // is consumed by NEITHER, so it does not count as "already have a type".
+    if (!$this->hasMembershipTypeForEntity($lineItem)) {
+      // Derive a numeric membership_type_id from the price field value. The PFV
+      // may be referenced numerically or by ANY pseudoconstant; the suffix after
+      // the colon IS the field to match (id / name / label / ...), so we query on
+      // that field rather than enumerating forms. As elsewhere, ->first() wins on
+      // a non-unique match; an unresolvable reference leaves it NULL to fail below.
+      $pfvQuery = \Civi\Api4\PriceFieldValue::get(FALSE)->addSelect('membership_type_id');
+      $matched = FALSE;
+      if (!empty($lineItem['price_field_value_id'])) {
+        $pfvQuery->addWhere('id', '=', $lineItem['price_field_value_id']);
+        $matched = TRUE;
+      }
+      else {
+        foreach ($lineItem as $key => $value) {
+          if (strpos($key, 'price_field_value_id:') === 0 && !empty($value)) {
+            $pfvQuery->addWhere(substr($key, strlen('price_field_value_id:')), '=', $value);
+            $matched = TRUE;
+            break;
+          }
+        }
+      }
+      if ($matched) {
+        $lineItem['membership_type_id'] = $pfvQuery->execute()->first()['membership_type_id'] ?? NULL;
+      }
     }
-    if (empty($lineItem['membership_type_id'])) {
+    if (!$this->hasMembershipTypeForEntity($lineItem)) {
       throw new \CRM_Core_Exception(
         'Order modify: cannot create a membership for a line whose price field ' .
         'value has no membership type'
@@ -1079,21 +1262,30 @@ class Modify extends AbstractAction {
       'values' => $reversal,
     ]);
 
-    // Provenance seam: hand a listener the exact original->reversal pairing at
-    // the one moment it is known for certain. afform_order records nothing
-    // itself; a consumer can persist this (e.g. an Activity, a custom field, or
-    // eventually an explicit reverses-line column). See OrderLineReversedEvent
-    // and the README known-limitation on reversal provenance.
-    $reversalLineID = (int) ($result->first()['id'] ?? 0);
+    // Keep the created reversal line + its pairing so the action result can
+    // report the removal in full (the original id + the reversal line that
+    // backed it out) without a re-fetch.
+    $reversalLine = $result->first();
+    $reversalLineID = (int) ($reversalLine['id'] ?? 0);
     if ($reversalLineID) {
-      $reversedEvent = new OrderLineReversedEvent(
-        $contributionID,
-        $lineItemID,
-        $reversalLineID,
-        -1 * (float) ($orig['line_total'] ?? 0)
-      );
-      \Civi::dispatcher()->dispatch(OrderLineReversedEvent::EVENT_NAME, $reversedEvent);
+      $this->modifyReversalLines[] = $reversalLine;
+      // Self-contained reversal record: the original<->reversal pairing plus the
+      // amount + context the per-line event used to carry, so retiring that event
+      // loses no data.
+      $this->modifyReversals[] = [
+        'original_line_item_id' => $lineItemID,
+        'reversal_line_item_id' => $reversalLineID,
+        'reversal_line_total' => -1 * (float) ($orig['line_total'] ?? 0),
+        'context' => $this->context,
+      ];
+      // The original was effectively removed (kept on the ledger, but backed out
+      // by the reversal) - record it as actually-removed.
+      $this->modifyRemovedLineIDs[] = $lineItemID;
     }
+    // Reversal provenance (original<->reversal pairing + amount + context) is
+    // reported in aggregate: on OrderModifiedEvent (getReversals) and on the
+    // action result (`reversals`). The former per-line OrderLineReversedEvent was
+    // retired - everything it carried is in those records.
   }
 
   /**

@@ -2,29 +2,49 @@
 
   <!--
     Default "edit an order" form shipped by afform_order. Generic and
-    policy-free: a Contribution af-entity carries the header detail fields, and
-    <af-order-edit> hosts the line-item edit cart (plus, for a recurring series,
-    the installment/future-template scope toggle). The host's combined Save
-    reads the detail fields below (via details-entity) and writes them with
-    Contribution.update, then submits the line-item changes through
-    OrderAO.modify.
+    policy-free. It rides the AFFORM SUBMIT pipeline (not a bespoke client save):
+    afform.submit() posts the Contribution header fields + the cart's stashed
+    line-item diff, and Civi\AfformOrder\Submit's edit branch applies both
+    atomically via OrderAO.editOrder (lines first, then header).
 
     Reached as .../civicrm/order/edit#?Contribution1=<id> - the arg is the
-    af-entity name, which is how afform autofills it. Copy-and-modify freely;
-    add header fields to the fieldset as needed (status/financial-type changes
-    on an existing order carry financial side effects, so they are left out of
-    this conservative default).
+    af-entity name, which afform autofills.
+
+    Future installments of a recurring series are edited as their OWN
+    contribution: resolve/create the series template (OrderAO.ensureRecurTemplate)
+    and open this same form at that template's id. There is deliberately no
+    in-form scope toggle.
   -->
 
   <af-entity type="Contribution" name="Contribution1" actions="{update: true}" url-autofill="1" />
 
   <div af-fieldset="Contribution1" class="af-container af-layout-cols af-order-edit-details">
-    <af-field name="receive_date" defn="{label: 'Contribution Date', input_attrs: {time: false}}" />
+    <!--
+      Do NOT force input_attrs:{time:false} here. receive_date / receipt_date are
+      DateTime fields whose stored value is 19 chars ("Y-m-d H:i:s"); forcing
+      time:false makes crm-ui-datepicker expect a 10-char value (requiredLength,
+      crmUi.js) and flag the 19-char value ng-invalid-incomplete-date-time, which
+      blocks afform.submit(). afform already sets the right time option per field
+      data_type, so leave it to the metadata (Date fields render date-only).
+    -->
+    <af-field name="receive_date" defn="{label: 'Contribution Date', input_attrs: {defaultTimeOnDate: true}}" />
     <af-field name="source" />
-    <af-field name="receipt_date" defn="{input_attrs: {time: false}}" />
-    <af-field name="thankyou_date" defn="{input_attrs: {time: false}}" />
+    <af-field name="receipt_date" defn="{input_attrs: {defaultTimeOnDate: true}}" />
+    <af-field name="thankyou_date" />
   </div>
 
-  <af-order-edit contribution-id="routeParams.Contribution1" details-entity="Contribution1"></af-order-edit>
+  <!--
+    The cart's computed line-item diff rides in the form's 'extra' bag, NOT a
+    declared field: <af-field-line-items afform-submit> writes it to
+    afForm.getFieldData().order_edit ( = data.extra.fields.order_edit ), which
+    afform.submit() posts wholesale (values: data). It must NOT be a declared
+    <af-field> - a Hidden field validates/coerces its value as a scalar, and the
+    diff is an object, which would fail form validation. The server reads it via
+    getValues()['extra']['fields']['order_edit'].
+  -->
+  <af-order-edit-cart contribution-id="routeParams.Contribution1"></af-order-edit-cart>
+
+  <button class="af-button btn btn-primary" crm-icon="fa-check"
+    ng-click="afform.submit()" ng-if="afform.showSubmitButton">Save changes</button>
 
 </af-form>
