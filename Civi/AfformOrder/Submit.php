@@ -320,6 +320,74 @@ class Submit extends AutoSubscriber {
     }
   }
 
+  /**
+   * Optional receipt/confirmation, modelling core QF's "send receipt" checkbox.
+   *
+   * send_receipt / receipt_text / from_email_address are non-entity ("extra")
+   * afform fields (like is_recur), so a form opts in simply by RENDERING them —
+   * drop them and no receipt is sent. When send_receipt is truthy we send the
+   * standard contribution confirmation via Contribution.sendconfirmation, which
+   * is core's only receipt entry point (no API4 equivalent yet — the same
+   * situation as order completion; when core ships one this swaps to it, and it
+   * is cleaner than hand-assembling the mail BAO's input/ids). from_email_address
+   * is the usual "Name <email>" option value; we split it into the from
+   * name/email the API expects, and omit it (→ domain default) when absent.
+   *
+   * TIMING: sent at create. For an order settled by a LIVE processor later in the
+   * SAME request (native checkout @ -100) this is an at-create confirmation, not a
+   * post-payment one — a consumer using such a processor should rely on the
+   * processor/completion receipt instead of this field. The common paths here
+   * ($0, pay-later, bill-to) have no in-request processor, so create-time is
+   * correct. Not called on order EDIT — editing is not a receipt event.
+   *
+   * Degrades gracefully: a send failure is logged, never fatal (the order stands).
+   *
+   * @param int $contributionID
+   * @param array $extra
+   */
+  private function sendReceiptIfRequested(int $contributionID, array $extra): void {
+    if (empty($extra['send_receipt'])) {
+      return;
+    }
+    $params = ['id' => $contributionID];
+    if (!empty($extra['receipt_text'])) {
+      $params['receipt_text'] = $extra['receipt_text'];
+    }
+    if (!empty($extra['from_email_address'])) {
+      [$fromName, $fromEmail] = $this->parseReceiptFromAddress((string) $extra['from_email_address']);
+      if ($fromEmail !== '') {
+        $params['receipt_from_email'] = $fromEmail;
+        if ($fromName !== '') {
+          $params['receipt_from_name'] = $fromName;
+        }
+      }
+    }
+    try {
+      civicrm_api3('Contribution', 'sendconfirmation', $params);
+    }
+    catch (\Exception $e) {
+      \Civi::log()->warning(
+        'afform_order: receipt send failed for order {id}: {msg}',
+        ['id' => $contributionID, 'msg' => $e->getMessage()]
+      );
+    }
+  }
+
+  /**
+   * Split a "From Email Address" option value into [name, email]. Accepts the
+   * usual "Display Name <addr@example.org>" form (returns both) or a bare address
+   * (returns ['', addr]). Returns ['', ''] when nothing usable is found.
+   *
+   * @param string $value
+   * @return array{0:string,1:string}
+   */
+  private function parseReceiptFromAddress(string $value): array {
+    $value = trim($value);
+    if (preg_match('/^(.*)<([^>]+)>\s*$/', $value, $m)) {
+      // Strip surrounding quotes a configured "From" label often carries.
+      return [trim($m[1], " \t\"'"), trim($m[2])];
+    }
+    return ['', filter_var($value, FILTER_VALIDATE_EMAIL) ? $value : ''];
   }
 
   /**
@@ -485,6 +553,7 @@ class Submit extends AutoSubscriber {
    * unpacks onto the membership Order.create creates.
    *
    * Keys read from the row (all optional):
+   *  - _join_date               entity_id.join_date
    *  - _start_date              entity_id.start_date
    *  - _end_date                entity_id.end_date
    *  - _status_id               entity_id.status_id (+ entity_id.is_override = TRUE)
@@ -495,6 +564,9 @@ class Submit extends AutoSubscriber {
    * how CRM_Member_Form_Membership handles admin-entered status overrides.
    */
   private function applyMembershipOverrides(array &$line, array $row): void {
+    if (!empty($row['_join_date'])) {
+      $line['entity_id.join_date'] = $row['_join_date'];
+    }
     if (!empty($row['_start_date'])) {
       $line['entity_id.start_date'] = $row['_start_date'];
     }

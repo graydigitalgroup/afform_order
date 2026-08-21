@@ -47,6 +47,20 @@
     </div>
   </fieldset>
 
+  <!-- Optional receipt. These are non-entity "extra" fields (like is_recur):
+       afform_order's submit reads send_receipt / receipt_text /
+       from_email_address and, when send_receipt is on, sends
+       Contribution.sendconfirmation. Rendering them is the only opt-in — drop
+       this fieldset to disable receipts. (A consumer can add a from_email_address
+       Select from the "from_email_address" option group; omitted here so the
+       example stays dependency-free and uses the domain default From address.) -->
+  <fieldset class="af-container" af-title="Receipt">
+    <af-field defn="{name: 'send_receipt', label: 'Email a receipt / confirmation', input_type: 'CheckBox', data_type: 'Boolean'}" />
+    <div ng-if="afform.getFieldData().send_receipt" class="af-container">
+      <af-field defn="{name: 'receipt_text', label: 'Receipt Message', input_type: 'TextArea', help_pre: 'Optional note added to the receipt. Leave blank for the default template.'}" />
+    </div>
+  </fieldset>
+
   <!-- Advisory cart warnings (registered by consumers via afOrderCartChecks).
        With no checks registered this block is simply empty. -->
   <div class="afo-cart-gate" ng-if="afform.afOrderCart &amp;&amp; afform.afOrderCart.line_items &amp;&amp; afform.afOrderCart.line_items.warnings().length">

@@ -47,8 +47,14 @@
         }
         // Buffer the success first, then close - crm.ajax fires
         // crmPopupFormSuccess (the SearchKit/livePage reload) on dialogclose
-        // only when a success was buffered.
-        $dialog.trigger('crmFormSuccess');
+        // only when a success was buffered. crm.ajax.js's buffering handler
+        // stores the event's second trigger argument as the "success" flag
+        // (`formData = data`) and only relays crmPopupFormSuccess `if
+        // (formData)` - so this MUST pass a truthy payload, or the buffered
+        // flag stays undefined/falsy and the opener never reloads (verified
+        // live: the popup closes fine either way, only the reload is silently
+        // lost).
+        $dialog.trigger('crmFormSuccess', [{}]);
         $dialog.dialog('close');
         return true;
       }

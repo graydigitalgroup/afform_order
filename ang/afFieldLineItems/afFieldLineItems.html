@@ -215,6 +215,11 @@
       <div class="afo-edit-field-row"
            ng-if="$ctrl.editModel.entity_table === 'civicrm_membership' && $ctrl.editMembershipMode === 'new'">
         <div class="afo-edit-field">
+          <label>{{ ts('Member Since') }}</label>
+          <input class="form-control" crm-ui-datepicker="{time: false}"
+                 ng-model="$ctrl.editModel._join_date" />
+        </div>
+        <div class="afo-edit-field">
           <label>{{ ts('Start Date') }}</label>
           <input class="form-control" crm-ui-datepicker="{time: false}"
                  ng-model="$ctrl.editModel._start_date" />
