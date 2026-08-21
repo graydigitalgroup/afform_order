@@ -5,6 +5,7 @@ namespace Civi\AfformOrder;
 use Civi\Afform\Event\AfformSubmitEvent;
 use Civi\Afform\Event\AfformValidateEvent;
 use Civi\AfformOrder\Event\OrderCreateEvent;
+use Civi\AfformOrder\Event\OrderCreateValidateEvent;
 use Civi\AfformOrder\Event\OrderCreatedEvent;
 use Civi\AfformOrder\Event\OrderEditRoutedEvent;
 use Civi\Core\Service\AutoSubscriber;
@@ -211,6 +212,20 @@ class Submit extends AutoSubscriber {
       );
     }, $lineItems);
 
+    // Validate (veto) seam: dispatched on the FINAL line set, after the alter
+    // seam and immediately before the write, so a consumer can STOP the create
+    // if it fails a rule (e.g. a duplicate price-field-value line). Unlike the
+    // modify seam there is no prior order state and no metadata side-channel: a
+    // veto is a hard error, so we throw and nothing is written.
+    $createValidate = new OrderCreateValidateEvent($lineItems, $recurValues, $contribution);
+    \Civi::dispatcher()->dispatch(OrderCreateValidateEvent::EVENT_NAME, $createValidate);
+    $createErrors = $createValidate->getErrors();
+    if ($createErrors) {
+      // Keep show_detailed_error so the message reaches the user even without
+      // 'view debug output' permission (see CRM_Api4_Page_AJAX).
+      throw new \CRM_Core_Exception(implode("\n", $createErrors), 0, ['show_detailed_error' => TRUE]);
+    }
+
     $order = \Civi\Api4\Order::create(FALSE)
       ->setContributionValues($contribution)
       ->setLineItems($lineItems);
@@ -239,6 +254,72 @@ class Submit extends AutoSubscriber {
       $event
     );
     \Civi::dispatcher()->dispatch(OrderCreatedEvent::NAME, $created);
+
+    // Zero-dollar orders: model core back-office behaviour — a $0 order has no
+    // balance to pay, so complete it now instead of leaving it pay-later.
+    // Completion fires civi.order.complete, which activates any membership on the
+    // order and sets its dates (Civi\Membership\OrderCompleteSubscriber). Without
+    // it a $0 membership order sits Pending with nothing to pay against, and the
+    // membership never leaves Pending. Non-zero orders are untouched — they flow
+    // through the native checkout (startCheckout @ -100).
+    $this->autoCompleteZeroDollarOrder((int) $saved['id']);
+
+    // Optional receipt/confirmation (models core QF's "send receipt"). Sent AFTER
+    // any $0 completion so a completed order's receipt reflects its final state.
+    $this->sendReceiptIfRequested((int) $saved['id'], $extra);
+  }
+
+  /**
+   * Complete a $0 order so the entity-completion pipeline runs.
+   *
+   * A zero-total order has no balance and no money to move, so there is no
+   * Payment / FinancialTrxn to record — we need only the completion SIDE EFFECTS
+   * (status → Completed, membership activation + dates). completeOrder() is
+   * core's entry point for exactly that: it dispatches civi.order.complete
+   * (→ Civi\Membership\OrderCompleteSubscriber) WITHOUT requiring any payment
+   * input, and with empty input sends no receipt. Without this the order sits
+   * pay-later/Pending with nothing to pay against and a linked membership never
+   * leaves Pending.
+   *
+   * We call the core BAO directly rather than an api3 API action: it is the
+   * minimal, money-free expression of "complete this order", and afform_order
+   * already bridges to core BAOs elsewhere (e.g. ContributionRecur::
+   * updateOnTemplateUpdated). When core ships a public Order.complete this single
+   * call swaps to it. (completeOrder uses api3 INTERNALLY — core's implementation
+   * detail, not ours to carry.)
+   *
+   * Only EXACTLY-$0 orders are auto-completed; any positive total is left to the
+   * checkout/payment flow. Degrades gracefully: the order is already created, so
+   * if completion fails it simply stays Pending for manual completion rather than
+   * failing the whole submit.
+   *
+   * @param int $contributionID
+   */
+  private function autoCompleteZeroDollarOrder(int $contributionID): void {
+    $contribution = \Civi\Api4\Contribution::get(FALSE)
+      ->addSelect('total_amount', 'contribution_status_id:name')
+      ->addWhere('id', '=', $contributionID)
+      ->execute()
+      ->first();
+    // Only an exactly-$0 order, and only if a post-create listener hasn't already
+    // completed it.
+    if (empty($contribution)
+      || (float) ($contribution['total_amount'] ?? -1) !== 0.0
+      || ($contribution['contribution_status_id:name'] ?? '') === 'Completed'
+    ) {
+      return;
+    }
+    try {
+      \CRM_Contribute_BAO_Contribution::completeOrder([], NULL, $contributionID);
+    }
+    catch (\Exception $e) {
+      \Civi::log()->warning(
+        'afform_order: could not auto-complete $0 order {id}: {msg}',
+        ['id' => $contributionID, 'msg' => $e->getMessage()]
+      );
+    }
+  }
+
   }
 
   /**
