@@ -282,97 +282,107 @@ class Modify extends AbstractAction {
     // would book AR adjustments against a contribution that owes nothing.
     $isTemplate = !empty($contribution['is_template']);
 
-    // 2. For PAID contributions, classify the net effect and dispatch a validate
-    //    event so a subscriber can veto (e.g. route refund-producing edits to a
-    //    refund-request workflow). We do this BEFORE any writes. With no
-    //    subscriber the change proceeds (generic "just works"); if not vetoed we
-    //    perform the paid restructure (line reversal) below.
+    // 2. Classify the net effect and dispatch the validate (veto) seam. This
+    //    runs on EVERY modify path (Pending, template, paid): the seam exists so
+    //    a subscriber can STOP any modify before writes, not only a paid one
+    //    (e.g. a consumer rejecting a duplicate price-field-value on a pending
+    //    order). Dispatched BEFORE any writes and BEFORE the alter seam, so a
+    //    consumer can never reshape lines the gate then rejects.
+    //
+    //    Consumers that only care about paid edits self-guard: the refund gate,
+    //    for one, stands down when nothing has been paid - a pending/template
+    //    contribution has no payments, so a decrease cannot create an
+    //    overpayment. Templates still route to the delete-based restructure
+    //    below; the event firing for them is harmless because no paid-path
+    //    machinery (beginPaidAdjustment etc.) runs.
+    //
+    //    NOTE: context is OPTIONAL. OrderAO.modify is generic; requiring a
+    //    context would be surprising for a non-core API and would leak a
+    //    consumer's refund policy into the shared engine. We simply carry
+    //    whatever context the caller set (default '') and hand it to validate
+    //    subscribers. Any gating of refund-producing edits is a SUBSCRIBER's job
+    //    (e.g. a consumer vetoes a decrease unless it came from an approved
+    //    refund request).
+    $projectedTotal = $this->projectNewTotal($contributionID);
+    $currentTotal = (float) ($contribution['total_amount'] ?? 0);
+    $netDelta = $projectedTotal - $currentTotal;
+    if (abs($netDelta) < 0.005) {
+      $netEffect = OrderModifyValidateEvent::EFFECT_NET_ZERO;
+    }
+    elseif ($netDelta > 0) {
+      $netEffect = OrderModifyValidateEvent::EFFECT_INCREASE;
+    }
+    else {
+      $netEffect = OrderModifyValidateEvent::EFFECT_DECREASE;
+    }
+
+    $event = new OrderModifyValidateEvent(
+      $contributionID,
+      $statusName,
+      $netEffect,
+      $netDelta,
+      $this->lineItemsToAdd,
+      $this->lineItemsToRemove,
+      $this->context,
+      $this->contextDetail
+    );
+    \Civi::dispatcher()->dispatch(OrderModifyValidateEvent::EVENT_NAME, $event);
+    $errors = $event->getErrors();
+    if ($errors) {
+      // A subscriber vetoed the modification. Nothing has been written.
+      //
+      // HOW THE OUTCOME REACHES THE CALLER depends on whether the subscriber
+      // attached engine-neutral metadata to the validate event:
+      //
+      //  - VETO WITH METADATA (e.g. a consumer's gate routing a
+      //    refund-producing edit: "don't apply this; turn it into a refund
+      //    request, here is the intended change"). This is NOT an error - it
+      //    is a valid outcome the engine declined to auto-apply and is
+      //    reporting back. We return it as a SUCCESSFUL result: a row flagged
+      //    applied=FALSE carrying the veto message(s), and the metadata bag on
+      //    the ModifyResult::$validate_metadata property. This is the ONLY
+      //    reliable transport to the api4 AJAX client: a thrown
+      //    CRM_Core_Exception is flattened by CRM_Api4_Page_AJAX to
+      //    error_id/error_code/error_message and the rest of getErrorData() is
+      //    DROPPED, so structured metadata cannot ride out on an exception. A
+      //    200 result, by contrast, is returned whole (declared Result
+      //    properties are forwarded alongside `values`, and the client's
+      //    arrayObject() copies them onto the resolved result). afform_order
+      //    names no keys in the bag; a consumer (and its client) agree on them
+      //    (e.g. 'refund_required').
+      //
+      //  - VETO WITHOUT METADATA (e.g. an unverifiable refund-request context,
+      //    a double-reversal collision, or a hard duplicate-line rejection).
+      //    This is a genuine rejection the user must see as an error, so we
+      //    THROW.
+      //
+      // In BOTH cases nothing was written (the veto fires before any
+      // restructure).
+      $metadata = $event->getAllMetadata();
+      if (!empty($metadata)) {
+        $result->validate_metadata = $metadata;
+        $result[] = [
+          'id' => $contributionID,
+          'applied' => FALSE,
+          'net_effect' => $netEffect,
+          'net_delta' => $netDelta,
+          'messages' => $errors,
+        ];
+        return;
+      }
+      // No metadata: a hard rejection. Keep show_detailed_error so the
+      // message itself (not a generic "an error occurred") reaches the user
+      // even without 'view debug output' permission (see CRM_Api4_Page_AJAX).
+      throw new \CRM_Core_Exception(implode("\n", $errors), 0, ['show_detailed_error' => TRUE]);
+    }
+
+    // 3. PAID restructure. Not vetoed - shape the lines being added (pre-save
+    //    mutate seam) THEN restructure (line reversal). The validate event above
+    //    is the gate; this alter seam runs only after it passes, so a consumer
+    //    can never reshape lines that the gate then rejects. (Order: validate ->
+    //    alter -> write, the same lifecycle as create.) See dispatchModifyAlter /
+    //    OrderModifyEvent.
     if (!$isPending && !$isTemplate) {
-      // NOTE: context is OPTIONAL. OrderAO.modify is generic; requiring a
-      // context would be surprising for a non-core API and would leak a
-      // consumer's refund policy into the shared engine. We simply carry
-      // whatever context the caller set (default '') and hand it to validate
-      // subscribers. Any gating of refund-producing edits is a SUBSCRIBER's job
-      // (e.g. a consumer extension vetoes a decrease unless it came from an
-      // approved refund request). An install with no such subscriber gets the
-      // generic "just works" behaviour: the paid reversal proceeds.
-      $projectedTotal = $this->projectNewTotal($contributionID);
-      $currentTotal = (float) ($contribution['total_amount'] ?? 0);
-      $netDelta = $projectedTotal - $currentTotal;
-      if (abs($netDelta) < 0.005) {
-        $netEffect = OrderModifyValidateEvent::EFFECT_NET_ZERO;
-      }
-      elseif ($netDelta > 0) {
-        $netEffect = OrderModifyValidateEvent::EFFECT_INCREASE;
-      }
-      else {
-        $netEffect = OrderModifyValidateEvent::EFFECT_DECREASE;
-      }
-
-      $event = new OrderModifyValidateEvent(
-        $contributionID,
-        $statusName,
-        $netEffect,
-        $netDelta,
-        $this->lineItemsToAdd,
-        $this->lineItemsToRemove,
-        $this->context,
-        $this->contextDetail
-      );
-      \Civi::dispatcher()->dispatch(OrderModifyValidateEvent::EVENT_NAME, $event);
-      $errors = $event->getErrors();
-      if ($errors) {
-        // A subscriber vetoed the modification. Nothing has been written.
-        //
-        // HOW THE OUTCOME REACHES THE CALLER depends on whether the subscriber
-        // attached engine-neutral metadata to the validate event:
-        //
-        //  - VETO WITH METADATA (e.g. a consumer's gate routing a
-        //    refund-producing edit: "don't apply this; turn it into a refund
-        //    request, here is the intended change"). This is NOT an error - it
-        //    is a valid outcome the engine declined to auto-apply and is
-        //    reporting back. We return it as a SUCCESSFUL result: a row flagged
-        //    applied=FALSE carrying the veto message(s), and the metadata bag on
-        //    the ModifyResult::$validate_metadata property. This is the ONLY
-        //    reliable transport to the api4 AJAX client: a thrown
-        //    CRM_Core_Exception is flattened by CRM_Api4_Page_AJAX to
-        //    error_id/error_code/error_message and the rest of getErrorData() is
-        //    DROPPED, so structured metadata cannot ride out on an exception. A
-        //    200 result, by contrast, is returned whole (declared Result
-        //    properties are forwarded alongside `values`, and the client's
-        //    arrayObject() copies them onto the resolved result). afform_order
-        //    names no keys in the bag; a consumer (and its client) agree on them
-        //    (e.g. 'refund_required').
-        //
-        //  - VETO WITHOUT METADATA (e.g. an unverifiable refund-request context,
-        //    or a double-reversal collision). This is a genuine rejection the
-        //    user must see as an error, so we THROW as before.
-        //
-        // In BOTH cases nothing was written (the veto fires before any
-        // restructure).
-        $metadata = $event->getAllMetadata();
-        if (!empty($metadata)) {
-          $result->validate_metadata = $metadata;
-          $result[] = [
-            'id' => $contributionID,
-            'applied' => FALSE,
-            'net_effect' => $netEffect,
-            'net_delta' => $netDelta,
-            'messages' => $errors,
-          ];
-          return;
-        }
-        // No metadata: a hard rejection. Keep show_detailed_error so the
-        // message itself (not a generic "an error occurred") reaches the user
-        // even without 'view debug output' permission (see CRM_Api4_Page_AJAX).
-        throw new \CRM_Core_Exception(implode("\n", $errors), 0, ['show_detailed_error' => TRUE]);
-      }
-
-      // Not vetoed - shape the lines being added (pre-save mutate seam), THEN
-      // restructure. The validate event above is the gate; this alter seam runs
-      // only after it passes, so a consumer can never reshape lines that the
-      // gate then rejects. (Order matters: validate -> alter -> write, the same
-      // lifecycle as create.) See dispatchModifyAlter / OrderModifyEvent.
       $this->dispatchModifyAlter($contributionID, $isTemplate);
 
       // Perform the PAID restructure. Unlike the Pending path, "remove" here
@@ -504,13 +514,13 @@ class Modify extends AbstractAction {
       return;
     }
 
-    // 3. PENDING / TEMPLATE path: full add/remove restructure inside one
+    // 4. PENDING / TEMPLATE path: full add/remove restructure inside one
     //    transaction.
 
-    // Pre-save mutate seam over the lines being added. The Pending/template
-    // path has no validate (veto) seam of its own - that is the paid path's
-    // refund gate - so the alter seam simply runs here before the restructure.
-    // (On the paid path it runs after the veto passes; see above.)
+    // Pre-save mutate seam over the lines being added. The validate (veto) seam
+    // already ran above for this path too (step 2); as on the paid path, the
+    // alter seam runs only after the veto passes, so a consumer can never
+    // reshape lines the gate then rejects.
     $this->dispatchModifyAlter($contributionID, $isTemplate);
 
     //    We use CRM_Core_Transaction::create()->run($callable) - the idiom
@@ -1125,8 +1135,8 @@ class Modify extends AbstractAction {
 
   /**
    * Compute what the contribution total WOULD be after applying the proposed
-   * add/remove, without writing anything. Used only to classify the net effect
-   * for the validate event on a paid contribution.
+   * add/remove, without writing anything. Used to classify the net effect for
+   * the validate event (dispatched on every modify path).
    *
    * = (sum of current lines, excluding those being removed)
    *   + (sum of lines being added)
