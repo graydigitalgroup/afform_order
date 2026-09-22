@@ -100,7 +100,17 @@
       // Civi\AfformOrder\Submit's edit branch forwards it to OrderAO.editOrder
       // (lines + header, atomically). Set by the <af-order-edit-cart> host that
       // the edit forms use. Default off, so the create path is unaffected.
-      afformSubmit: '<?'
+      afformSubmit: '<?',
+      // Optional (create mode). Names a prefilled entity field to read seed rows
+      // from, written as "EntityName.field" or "EntityName.fields.field". A
+      // consumer populates that field via an Afform.prefill subscriber with a
+      // declarative list of specs — [{price_field_value_id, qty?, ...}, ...],
+      // where each spec may also carry any per-line key the cart understands
+      // (e.g. _existing_membership_id). The cart resolves each spec against its
+      // own picker options and adds it as a normal row. The engine stays generic:
+      // it knows only how to consume the seed, not what it represents or who
+      // supplied it. See the seed-watch in $onInit.
+      seedFrom: '<?'
     },
     require: {
       afForm: '?^^afForm'
@@ -374,6 +384,50 @@
           }, function() {
             ctrl.runChecks();
           }, true);
+        }
+
+        // Generic prefill-seed seam (create mode only). A consumer names a
+        // prefilled entity field via `seed-from`; we watch it, and once BOTH the
+        // seed AND the picker options have arrived (both are async — prefill /
+        // URL autofill and the PFV query resolve after $onInit) we add each
+        // declared spec as a normal cart row via the same code path the picker
+        // uses. Guards: run once, and only while the cart is still empty, so a
+        // staff member who has begun building the cart is never overwritten.
+        if (!ctrl.isEdit && ctrl.seedFrom && ctrl.afForm && ctrl.afForm.getData) {
+          var seedParts = ctrl.seedFrom.split('.');
+          var seedEntity = seedParts.shift();
+          if (seedParts[0] === 'fields') { seedParts.shift(); }
+          var seedField = seedParts.join('.');
+          var stopSeedWatch = $scope.$watch(function() {
+            var d = ctrl.afForm.getData(seedEntity);
+            var seed = (d && d[0] && d[0].fields) ? d[0].fields[seedField] : undefined;
+            // Gate on picker readiness too: addPickerSelection resolves the PFV
+            // from ctrl.pickerOptions, which loads asynchronously.
+            return (seed && seed.length && ctrl.pickerOptions && ctrl.pickerOptions.length) ? seed : undefined;
+          }, function(seed) {
+            if (!seed || !seed.length) { return; }
+            stopSeedWatch();
+            if (ctrl.cart && ctrl.cart.length) { return; }
+            seed.forEach(function(spec) {
+              if (!spec || !spec.price_field_value_id) { return; }
+              var before = ctrl.cart.length;
+              ctrl.addPickerSelection(spec.price_field_value_id);
+              if (ctrl.cart.length <= before) { return; }
+              var row = ctrl.cart[ctrl.cart.length - 1];
+              // Overlay any per-line keys the spec carried (e.g. an overridden
+              // qty, or a link to an existing entity) onto the picker-built row;
+              // unknown keys are simply ignored downstream.
+              angular.forEach(spec, function(val, key) {
+                if (key !== 'price_field_value_id') {
+                  row[key] = val;
+                }
+              });
+              if (spec.qty) {
+                row.line_total = (parseFloat(row.unit_price) || 0) * spec.qty;
+              }
+            });
+            if (ctrl.cart.length) { ctrl.recompute(); }
+          });
         }
       };
 
