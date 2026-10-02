@@ -1,3 +1,13 @@
+> ## 📦 This project has moved
+>
+> `afform_order` is now hosted and maintained on **lab.civicrm.org**:
+>
+> - **Source & issues:** https://lab.civicrm.org/extensions/afform_order
+> - **Install from the CiviCRM Extensions Directory:** https://civicrm.org/extensions/afform-order
+>
+> This GitHub repository is no longer maintained. Please use the lab project above
+> for the latest releases, to report issues, and to contribute.
+
 # afform_order
 
 This extension does two things, and it's worth separating them because they may not
